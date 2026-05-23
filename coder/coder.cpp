@@ -170,7 +170,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
 
     std::vector<int> min_bits(band_count, 0);
-    std::vector<int> max_bits(band_count, 10); // scale from 0..10
+    std::vector<int> max_bits(band_count, 10); 
     if (use_is && is_start_band < band_count) {
         for (int i = is_start_band; i < band_count; ++i) {
             min_bits[i] = 0;
@@ -285,7 +285,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             if (!active[l] || bits[l] <= 0) continue;
             auto& vec = quantized[l];
             if (vec.empty()) continue;
-            // Выбор порядка LPC с учётом индекса полосы
             int best_order = select_best_order(vec, l);
             orders[l] = best_order;
             vec = apply_lpc(vec, best_order);
