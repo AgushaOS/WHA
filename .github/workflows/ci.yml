@@ -1,0 +1,42 @@
+name: WHA CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  build:
+    name: Build project
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check compiler version
+        run: g++ --version
+      
+      - name: Create build directory 
+        run: mkdir -p build 
+        
+      - name: Build coder 
+        run: |
+          g++ -o build/code coder/coder.cpp \
+            -O3 -march=native -mtune=native \
+            -ffast-math -funroll-loops -fomit-frame-pointer \
+            -flto -fno-signed-zeros -fno-trapping-math -fassociative-math \
+            -fopenmp -DNDEBUG \
+            -std=c++23
+      
+      - name: Build decoder
+        run: |
+          g++ -o build/decode decoder/decoder.cpp \
+            -O3 -march=native -mtune=native \
+            -ffast-math -funroll-loops -fomit-frame-pointer \
+            -flto -fno-signed-zeros -fno-trapping-math -fassociative-math \
+            -fopenmp -DNDEBUG \
+            -std=c++23
