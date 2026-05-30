@@ -1,0 +1,23 @@
+# build
+build/
+cmake-build-*/
+
+# compiled
+*.o
+*.obj
+*.exe
+*.out
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# cpp
+Makefile
+
+# ide and os
+.vscode/
+.idea/
+*.swp
+.DS_Store
