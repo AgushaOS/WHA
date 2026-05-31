@@ -98,7 +98,7 @@ public:
             subbands = std::move(ordered);
         }
         if (sr >= 44100) {
-            for (size_t i = 12; i < 16 && i < subbands.size(); ++i)
+            for (size_t i = 12; i < subbands.size(); ++i)
                 for (float& x : subbands[i])
                     x *= 0.25f;
         }

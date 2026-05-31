@@ -239,12 +239,22 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         read_scales(scales0, bits0, active0);
         if (block_ch == 2) read_scales(scales1, bits1, active1);
 
-        uint8_t is_scale_idx = 0;
-        float is_scale = 1.0f;
-        if (block_ver >= 9) {
-            need(1);
-            is_scale_idx = blk[ptr++];
-            is_scale = is_scale_from_idx(is_scale_idx);
+        std::vector<float> is_r(band_count, 0.5f);
+        if (block_ver >= 9 && block_ch == 2) {
+            int is_start = get_is_start_band(target_kbps);
+            if (is_start < band_count) {
+                int total_bits = 0;
+                for (int i = is_start; i < band_count; ++i) total_bits += get_r_bits(i);
+                int total_bytes = (total_bits + 7) / 8;
+                if (ptr + total_bytes > blk.size()) throw std::runtime_error("Not enough data for r");
+                BitReaderMSB r_reader(blk.data() + ptr, total_bytes);
+                for (int i = is_start; i < band_count; ++i) {
+                    int bits = get_r_bits(i);
+                    uint32_t q = r_reader.read_bits(bits);
+                    is_r[i] = dequantize_r(q, bits);
+                }
+                ptr += total_bytes;
+            }
         }
 
         need(4);
@@ -260,7 +270,10 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
         for (int ib = 0; ib < band_count; ++ib) {
             if (active0[ib] && bits0[ib] > 0) {
-                int order = (int)payload_reader.read_bits(2);
+                int order = 0;
+                if (!(block_ver >= 9 && ib >= get_is_start_band(target_kbps) && block_ch == 2)) {
+                    order = (int)payload_reader.read_bits(2);
+                }
                 int k = payload_reader.read_bits(4);
                 auto uvals = rice_decode(payload_reader, band_shapes[ib], k);
                 residuals.resize(uvals.size());
@@ -290,15 +303,17 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             }
         }
 
-        int is_start_band = get_is_start_band(target_kbps);
         if (block_ch == 2 && num_channels == 2) {
-            std::vector<float> left_tmp, right_tmp;
+            int is_start = get_is_start_band(target_kbps);
             for (int ib = 0; ib < band_count; ++ib) {
                 if (mode_ms[ib]) {
-                    if (block_ver >= 9 && ib >= is_start_band && is_start_band < band_count) {
-                        ch1_bands[ib] = ch0_bands[ib];
-                        for (float& x : ch1_bands[ib]) x *= is_scale;
+                    if (block_ver >= 9 && ib >= is_start && is_start < band_count) {
+                        std::vector<float> left, right;
+                        apply_is(ch0_bands[ib], is_r[ib], left, right);
+                        ch0_bands[ib] = std::move(left);
+                        ch1_bands[ib] = std::move(right);
                     } else {
+                        std::vector<float> left_tmp, right_tmp;
                         ms_to_lr(ch0_bands[ib], ch1_bands[ib], left_tmp, right_tmp);
                         ch0_bands[ib] = std::move(left_tmp);
                         ch1_bands[ib] = std::move(right_tmp);
