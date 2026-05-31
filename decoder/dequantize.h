@@ -35,8 +35,8 @@ inline void dequantize_band(
     };
 
     float dither_amp = 0.0f;
-    if (bits_per_sample <= 3)
-        dither_amp = scale * 0.0025f;
+    if (bits_per_sample <= 0)
+        dither_amp = scale * 0.025f;
 
     for (size_t i = 0; i < quantized.size(); ++i)
     {

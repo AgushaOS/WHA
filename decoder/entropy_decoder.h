@@ -85,3 +85,4 @@ inline void apply_inverse_lpc(const std::vector<int32_t>& residual, int order, s
 }
 
 #endif // ENTROPY_DECODER_H
+
