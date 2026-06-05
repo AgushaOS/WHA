@@ -39,6 +39,9 @@ inline DualAllocResult allocate_bits_dual(
     global_score.resize(n);
     active.assign(n, 1);
 
+    // bits0[0] = 3;
+    // bits1[0] = 3;
+
     bits0[0] = 5; bits1[0] = 4;
 
     for (int i = 0; i < n; i++) {

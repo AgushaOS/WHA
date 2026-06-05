@@ -18,7 +18,7 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
 }
 
 inline int get_is_start_band(float target_kbps) {
-    if (target_kbps < 128.0f) return 4;
+    if (target_kbps < 128.0f) return 2;
     if (target_kbps < 160.0f) return 4;
     if (target_kbps < 190.0f) return 8;
     return 999;
@@ -30,48 +30,72 @@ inline int get_r_bits(int band_idx) {
     return 4;
 }
 
-inline void compute_is_parameters(const std::vector<float>& left,
-                                  const std::vector<float>& right,
-                                  std::vector<float>& Y,
-                                  float& r,
-                                  float& sqrtE) {
-    size_t n = left.size();
-    double eL = 0.0, eR = 0.0;
+inline void compute_is_parameters_ex(const std::vector<float>& left,
+                                     const std::vector<float>& right,
+                                     std::vector<float>& Y,
+                                     float& r,
+                                     float& sqrtE,
+                                     bool& inv_flag)
+{
+    const size_t n = left.size();
+
+    double eL = 0.0, eR = 0.0, dot = 0.0;
+
     for (size_t i = 0; i < n; ++i) {
-        eL += left[i] * left[i];
-        eR += right[i] * right[i];
+        eL  += left[i]  * left[i];
+        eR  += right[i] * right[i];
+        dot += left[i]  * right[i];
     }
+
+    const double eps = 1e-12;
+
     double total = eL + eR;
-    if (total < 1e-12) {
+
+    if (total < eps || eL < eps || eR < eps) {
         r = 0.5f;
         sqrtE = 0.0f;
         Y.assign(n, 0.0f);
+        inv_flag = false;
         return;
     }
+
     r = static_cast<float>(eR / total);
     sqrtE = static_cast<float>(std::sqrt(total));
+
+    double corr = dot / (std::sqrt(eL * eR) + eps);
+
+    inv_flag = (corr < -0.2);
+
     double sqrt_eL = std::sqrt(eL);
     double sqrt_eR = std::sqrt(eR);
     double inv_sqrt_total = 1.0 / std::sqrt(total);
 
-    double eX = 0.0;
     std::vector<float> X(n);
+    double eX = 0.0;
+
     for (size_t i = 0; i < n; ++i) {
-        X[i] = static_cast<float>((sqrt_eL * left[i] + sqrt_eR * right[i]) * inv_sqrt_total);
-        eX += X[i] * X[i];
+        double Rterm = inv_flag ? -sqrt_eR * right[i]
+                                :  sqrt_eR * right[i];
+
+        double x = (sqrt_eL * left[i] + Rterm) * inv_sqrt_total;
+        X[i] = static_cast<float>(x);
+        eX += x * x;
     }
 
-    if (eX > 1e-12) {
-        double inv_sqrt_eX = 1.0 / std::sqrt(eX);
-        Y.resize(n);
-        for (size_t i = 0; i < n; ++i)
-            Y[i] = static_cast<float>(X[i] * inv_sqrt_eX * sqrtE);
-    } else {
+    if (eX < eps) {
         Y.assign(n, 0.0f);
+        return;
+    }
+
+    double inv_sqrt_eX = 1.0 / std::sqrt(eX);
+
+    Y.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        Y[i] = static_cast<float>(X[i] * inv_sqrt_eX * sqrtE);
     }
 }
 
-inline void apply_is(const std::vector<float>& Y, float r,
+inline void apply_is(const std::vector<float>& Y, float r, bool inv_flag,
                      std::vector<float>& left, std::vector<float>& right) {
     size_t n = Y.size();
     left.resize(n);
@@ -80,7 +104,7 @@ inline void apply_is(const std::vector<float>& Y, float r,
     float gr = std::sqrt(r);
     for (size_t i = 0; i < n; ++i) {
         left[i] = Y[i] * gl;
-        right[i] = Y[i] * gr;
+        right[i] = Y[i] * (inv_flag ? -gr : gr);
     }
 }
 
