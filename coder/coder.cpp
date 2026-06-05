@@ -61,6 +61,25 @@ std::vector<float> read_wav_f32(const std::string &path, uint32_t &sr, uint32_t 
     return out;
 }
 
+static std::vector<uint8_t> pack_bits(const std::vector<bool>& bits, int start, int end) {
+    int count = end - start;
+    int bytes = (count + 7) / 8;
+    std::vector<uint8_t> packed(bytes, 0);
+    for (int i = start; i < end; ++i) {
+        if (bits[i]) {
+            int idx = i - start;
+            packed[idx / 8] |= (1 << (idx % 8));
+        }
+    }
+    return packed;
+}
+
+static float scale_and_bits_to_step(float scale, int bits) {
+    if (bits <= 0) return 0.0f;
+    int max_int = (bits > 1) ? ((1 << (bits - 1)) - 1) : 1;
+    return scale / max_int;
+}
+
 std::vector<uint8_t> compress_block_adaptive_joint(
     const std::vector<float>& block,
     PWPT& wpt,
@@ -106,6 +125,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     int is_start_band = band_count;
     std::vector<float> is_r_vals(band_count, 0.5f);
+    std::vector<bool> is_inv_flags(band_count, false);   
     if (use_is) {
         is_start_band = get_is_start_band(target_kbps);
         if (is_start_band >= band_count) use_is = false;
@@ -144,12 +164,15 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         for (int i = is_start_band; i < band_count; ++i) {
             mode_ms[i] = 1;
             float r, sqrtE;
+            bool inv_flag;
             std::vector<float> Y;
-            compute_is_parameters(left_coeffs[i], right_coeffs[i], Y, r, sqrtE);
+            compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r, sqrtE, inv_flag);
             is_r_vals[i] = r;
+            is_inv_flags[i] = inv_flag;
             ch0_bands[i] = std::move(Y);
             ch1_bands[i].clear();
         }
+        block_ver = 12;
     }
 
     std::vector<float> energy0(band_count, 0.0f), energy1(band_count, 0.0f);
@@ -187,6 +210,10 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         int total_r_bits = 0;
         for (int i = is_start_band; i < band_count; ++i) total_r_bits += get_r_bits(i);
         header_bytes_est += (total_r_bits + 7) / 8;
+        if (block_ver >= 12) {
+            int inv_mask_bytes = (band_count - is_start_band + 7) / 8;
+            header_bytes_est += inv_mask_bytes;
+        }
     }
     int payload_budget = target_bits_budget - header_bytes_est * 8;
     if (payload_budget < 0) payload_budget = target_bits_budget / 2;
@@ -236,6 +263,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         int total_r_bits = 0;
         for (int i = is_start_band; i < band_count; ++i) total_r_bits += get_r_bits(i);
         header_max += (total_r_bits + 7) / 8;
+        if (block_ver >= 12) {
+            header_max += (band_count - is_start_band + 7) / 8;
+        }
     }
     header_max += 4;
     header_max += 32; 
@@ -251,20 +281,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     header.insert(header.end(), mask0.begin(), mask0.end());
     if (stereo) header.insert(header.end(), mask1.begin(), mask1.end());
 
-    auto pack_nibbles = [&](const std::vector<int>& bits, const std::vector<bool>& active) {
-        int nib = 0;
-        uint8_t cur = 0;
-        for (int i = 0; i < band_count; ++i) {
-            if (!active[i]) continue;
-            if ((nib & 1) == 0) cur = (bits[i] << 4);
-            else { cur |= bits[i]; header.push_back(cur); }
-            ++nib;
-        }
-        if (nib & 1) header.push_back(cur);
-    };
-    pack_nibbles(bits0, active0);
-    if (stereo) pack_nibbles(bits1, active1);
-
     std::vector<std::vector<std::vector<float>>> for_quant0 = { ch0_bands };
     QuantResult qres0 = quantize_levels(for_quant0, bits0);
     QuantResult qres1;
@@ -273,19 +289,20 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         qres1 = quantize_levels(for_quant1, bits1);
     }
 
-    auto pack_scales = [&](const std::vector<float>& scales, const std::vector<int>& bits,
-                           const std::vector<bool>& active) {
+    auto pack_steps = [&](const std::vector<float>& scales,
+                          const std::vector<int>& bits,
+                          const std::vector<bool>& active) {
         const float LOG_MIN = -24.0f, LOG_MAX = 24.0f;
         for (int i = 0; i < band_count; ++i) {
             if (!active[i]) continue;
-            int sb = get_scale_bits(i);
-            float s = scales[i];
+            int sb = get_scale_bits(i); 
+            float step = scale_and_bits_to_step(scales[i], bits[i]);
             if (sb == 16) {
-                uint16_t h = float_to_half(s);
+                uint16_t h = float_to_half(step);
                 header.push_back(h & 0xFF);
                 header.push_back((h >> 8) & 0xFF);
             } else {
-                float log_s = log2f(std::max(fabsf(s), 1e-12f));
+                float log_s = log2f(std::max(step, 1e-12f));
                 int max_idx = (1 << sb) - 1;
                 int idx = (int)((log_s - LOG_MIN) * max_idx / (LOG_MAX - LOG_MIN));
                 idx = std::clamp(idx, 0, max_idx);
@@ -297,8 +314,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             }
         }
     };
-    pack_scales(qres0.scales, bits0, active0);
-    if (stereo) pack_scales(qres1.scales, bits1, active1);
+    pack_steps(qres0.scales, bits0, active0);
+    if (stereo) pack_steps(qres1.scales, bits1, active1);
 
     if (block_ver >= 9 && use_is && is_start_band < band_count) {
         BitWriterMSB r_writer;
@@ -310,6 +327,13 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         r_writer.flush();
         std::vector<uint8_t> r_bytes = r_writer.data();
         header.insert(header.end(), r_bytes.begin(), r_bytes.end());
+
+        if (block_ver >= 12) {
+            std::vector<bool> inv_bits(band_count, false);
+            for (int i = is_start_band; i < band_count; ++i) inv_bits[i] = is_inv_flags[i];
+            std::vector<uint8_t> inv_mask = pack_bits(inv_bits, is_start_band, band_count);
+            header.insert(header.end(), inv_mask.begin(), inv_mask.end());
+        }
     }
 
     std::vector<int> orders0(band_count, 0), orders1(band_count, 0);
@@ -377,7 +401,7 @@ void save_compressed(const std::vector<std::vector<uint8_t>>& blocks, const std:
                      float target_kbps) {
     std::ofstream f(path, std::ios::binary);
     f.write("WHA1", 4);
-    uint8_t version = 11;
+    uint8_t version = 12;   
     f.write((char*)&version, 1);
     f.write((char*)&sr, 4);
     uint8_t ch = (uint8_t)num_channels;
@@ -396,7 +420,7 @@ void save_compressed(const std::vector<std::vector<uint8_t>>& blocks, const std:
         f.write((char*)blk.data(), len);
     }
     f.close();
-    std::cout << "Saved container v11 to " << path << " (" << blocks.size() << " blocks)\n";
+    std::cout << "Saved container v12 to " << path << " (" << blocks.size() << " blocks)\n";
 }
 
 std::tuple<std::vector<std::vector<uint8_t>>, uint32_t, int, int, int, float>
@@ -454,7 +478,7 @@ compress_audio(const std::string& input_path, const std::string& signal_type, fl
             }
         }
         auto comp = compress_block_adaptive_joint(block, wpt, num_channels, SETTINGS.wpt_level,
-                                                  effective_budget, target_kbps, sr, N, 11,
+                                                  effective_budget, target_kbps, sr, N, 12,
                                                   SETTINGS.enable_ms);
         int real_bits = (int)comp.size() * 8;
         reservoir += target_bits_per_block - real_bits;

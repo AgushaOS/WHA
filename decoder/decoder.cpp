@@ -96,6 +96,16 @@ static std::vector<int> compute_band_shapes(int block_size, int level) {
     return shapes;
 }
 
+static std::vector<bool> unpack_bits(const uint8_t* data, int bytes, int total_bits) {
+    std::vector<bool> bits(total_bits, false);
+    for (int i = 0; i < total_bits; ++i) {
+        int byte_idx = i / 8;
+        if (byte_idx >= bytes) break;
+        bits[i] = (data[byte_idx] >> (i % 8)) & 1;
+    }
+    return bits;
+}
+
 void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav) {
     init_half_table();
 
@@ -107,8 +117,8 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         throw std::runtime_error("Not a WHA container");
 
     uint8_t version = read_u8(f);
-    if (version != 11)
-        throw std::runtime_error("Unsupported container version (only v11 with VBR+Rice+LPC+IS is supported)");
+    if (version != 12)
+        throw std::runtime_error("Unsupported container version (only v12 with IS inversion is supported)");
 
     uint32_t sr = read_u32(f);
     uint8_t num_channels = read_u8(f);
@@ -196,25 +206,14 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         }
 
         std::vector<int> bits0(band_count, 0), bits1(band_count, 0);
-        auto read_active_nibbles = [&](std::vector<int>& bits, const std::vector<uint8_t>& active) {
-            int nibble_idx = 0;
-            for (int i = 0; i < band_count; ++i) {
-                if (!active[i]) continue;
-                if ((nibble_idx & 1) == 0) {
-                    uint8_t byte = blk[ptr++];
-                    bits[i] = (byte >> 4) & 0xF;
-                } else {
-                    bits[i] = blk[ptr - 1] & 0xF;
-                }
-                ++nibble_idx;
-            }
-        };
-        read_active_nibbles(bits0, active0);
-        if (block_ch == 2) read_active_nibbles(bits1, active1);
+        for (int i = 0; i < band_count; ++i) {
+            if (active0[i]) bits0[i] = 1;  
+            if (active1[i]) bits1[i] = 1;
+        }
 
-        std::vector<float> scales0(band_count, 0.0f), scales1(band_count, 0.0f);
-        auto read_scales = [&](std::vector<float>& scales, const std::vector<int>& bits,
-                               const std::vector<uint8_t>& active) {
+        std::vector<float> steps0(band_count, 0.0f), steps1(band_count, 0.0f);
+        auto read_steps = [&](std::vector<float>& steps, const std::vector<int>& bits,
+                              const std::vector<uint8_t>& active) {
             const float LOG_MIN = -24.0f, LOG_MAX = 24.0f;
             for (int i = 0; i < band_count; ++i) {
                 if (!active[i]) continue;
@@ -222,7 +221,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 if (sb == 16) {
                     uint16_t h = blk[ptr] | (blk[ptr + 1] << 8);
                     ptr += 2;
-                    scales[i] = half_to_float_fast(h);
+                    steps[i] = half_to_float_fast(h);
                 } else {
                     int idx;
                     if (sb == 8) {
@@ -231,15 +230,16 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                         idx = (blk[ptr] << 8) | blk[ptr + 1];
                         ptr += 2;
                     }
-                    float log_scale = LOG_MIN + idx * (LOG_MAX - LOG_MIN) / ((1 << sb) - 1);
-                    scales[i] = exp2f(log_scale);
+                    float log_step = LOG_MIN + idx * (LOG_MAX - LOG_MIN) / ((1 << sb) - 1);
+                    steps[i] = exp2f(log_step);
                 }
             }
         };
-        read_scales(scales0, bits0, active0);
-        if (block_ch == 2) read_scales(scales1, bits1, active1);
+        read_steps(steps0, bits0, active0);
+        if (block_ch == 2) read_steps(steps1, bits1, active1);
 
         std::vector<float> is_r(band_count, 0.5f);
+        std::vector<bool> is_inv(band_count, false);   
         if (block_ver >= 9 && block_ch == 2) {
             int is_start = get_is_start_band(target_kbps);
             if (is_start < band_count) {
@@ -254,6 +254,16 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                     is_r[i] = dequantize_r(q, bits);
                 }
                 ptr += total_bytes;
+
+                if (block_ver >= 12) {
+                    int inv_bytes = (band_count - is_start + 7) / 8;
+                    if (ptr + inv_bytes > blk.size()) throw std::runtime_error("Not enough data for inv mask");
+                    std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, band_count - is_start);
+                    for (int i = is_start; i < band_count; ++i) {
+                        is_inv[i] = inv_tmp[i - is_start];
+                    }
+                    ptr += inv_bytes;
+                }
             }
         }
 
@@ -269,7 +279,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         }
 
         for (int ib = 0; ib < band_count; ++ib) {
-            if (active0[ib] && bits0[ib] > 0) {
+            if (active0[ib]) {
                 int order = 0;
                 if (!(block_ver >= 9 && ib >= get_is_start_band(target_kbps) && block_ch == 2)) {
                     order = (int)payload_reader.read_bits(2);
@@ -280,7 +290,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 for (size_t i = 0; i < uvals.size(); ++i)
                     residuals[i] = zigzag_decode(uvals[i]);
                 apply_inverse_lpc(residuals, order, quantized);
-                dequantize_band(quantized, bits0[ib], scales0[ib], ch0_bands[ib]);
+                dequantize_band(quantized, steps0[ib], ch0_bands[ib]);
             } else {
                 ch0_bands[ib].assign(band_shapes[ib], 0.0f);
             }
@@ -288,7 +298,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
         if (block_ch == 2) {
             for (int ib = 0; ib < band_count; ++ib) {
-                if (active1[ib] && bits1[ib] > 0) {
+                if (active1[ib]) {
                     int order = (int)payload_reader.read_bits(2);
                     int k = payload_reader.read_bits(4);
                     auto uvals = rice_decode(payload_reader, band_shapes[ib], k);
@@ -296,7 +306,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                     for (size_t i = 0; i < uvals.size(); ++i)
                         residuals[i] = zigzag_decode(uvals[i]);
                     apply_inverse_lpc(residuals, order, quantized);
-                    dequantize_band(quantized, bits1[ib], scales1[ib], ch1_bands[ib]);
+                    dequantize_band(quantized, steps1[ib], ch1_bands[ib]);
                 } else {
                     ch1_bands[ib].assign(band_shapes[ib], 0.0f);
                 }
@@ -309,7 +319,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 if (mode_ms[ib]) {
                     if (block_ver >= 9 && ib >= is_start && is_start < band_count) {
                         std::vector<float> left, right;
-                        apply_is(ch0_bands[ib], is_r[ib], left, right);
+                        apply_is(ch0_bands[ib], is_r[ib], is_inv[ib], left, right);
                         ch0_bands[ib] = std::move(left);
                         ch1_bands[ib] = std::move(right);
                     } else {
