@@ -282,11 +282,11 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     if (stereo) header.insert(header.end(), mask1.begin(), mask1.end());
 
     std::vector<std::vector<std::vector<float>>> for_quant0 = { ch0_bands };
-    QuantResult qres0 = quantize_levels(for_quant0, bits0);
+    QuantResult qres0 = quantize_levels(for_quant0, bits0, target_kbps);
     QuantResult qres1;
     if (stereo) {
         std::vector<std::vector<std::vector<float>>> for_quant1 = { ch1_bands };
-        qres1 = quantize_levels(for_quant1, bits1);
+        qres1 = quantize_levels(for_quant1, bits1, target_kbps);
     }
 
     auto pack_steps = [&](const std::vector<float>& scales,
