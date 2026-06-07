@@ -297,7 +297,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             if (!active[i]) continue;
             int sb = get_scale_bits(i); 
             float step = scale_and_bits_to_step(scales[i], bits[i]);
-            if (sb == 16) {
+            if (sb == 17) {
                 uint16_t h = float_to_half(step);
                 header.push_back(h & 0xFF);
                 header.push_back((h >> 8) & 0xFF);
