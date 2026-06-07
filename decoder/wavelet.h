@@ -91,6 +91,7 @@ private:
     }
 public:
     std::vector<float> iwpt(std::vector<std::vector<float>>& subbands, float sr, int levels) {
+
         if (sr >= 44100) {
             for (size_t i = 12; i < subbands.size(); ++i) {
                 for (float& x : subbands[i]) x *= 4.0f;
@@ -110,6 +111,7 @@ public:
                 coeff = std::copysign(fast_pow_1333(absv), coeff);
             }
         }
+
         return wpt_reconstruct(subbands, levels);
     }
 };
