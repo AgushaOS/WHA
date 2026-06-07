@@ -218,7 +218,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             for (int i = 0; i < band_count; ++i) {
                 if (!active[i]) continue;
                 int sb = get_scale_bits(i);
-                if (sb == 16) {
+                if (sb == 17) {
                     uint16_t h = blk[ptr] | (blk[ptr + 1] << 8);
                     ptr += 2;
                     steps[i] = half_to_float_fast(h);
