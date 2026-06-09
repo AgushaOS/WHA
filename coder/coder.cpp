@@ -44,7 +44,7 @@ struct EncoderSettings {
 
 static int get_scale_bits(int band_idx) {
     if (band_idx < 2) return 16;
-    if (band_idx < 4) return 12;
+    if (band_idx < 4) return 16;
     return 8;
 }
 
@@ -116,8 +116,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
     int band_count = (int)coeff_counts.size();
 
-    uint8_t block_ver = (target_kbps < 192.0f) ? 9 : 8;
-    bool use_is = (stereo && target_kbps < 192.0f);
+    uint8_t block_ver = (target_kbps < 320.0f) ? 9 : 8;
+    bool use_is = (stereo && target_kbps < 320.0f);
 
     std::vector<uint8_t> mode_ms(band_count, 0);
     std::vector<std::vector<float>> ch0_bands(band_count);
@@ -221,7 +221,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     int reservoir_max = int(payload_budget * SETTINGS.reservoir_max_factor);
     DualAllocResult alloc = allocate_bits_dual(
         priority0, priority1, coeff_counts, payload_budget,
-        min_bits, max_bits, energy0, energy1, 0, reservoir_max);
+        min_bits, max_bits, energy0, energy1, 0, reservoir_max, target_kbps);
     std::vector<int> bits0 = alloc.bits0;
     std::vector<int> bits1 = alloc.bits1;
 
