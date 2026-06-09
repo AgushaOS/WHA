@@ -124,7 +124,7 @@ inline QuantResult quantize_levels(
                     q = static_cast<int32_t>(std::round(v_clip / step));
                     q = std::clamp(q, 0, 1);
                 } else {
-                    if (av < deadzone) {
+                    if (av < deadzone * deadzone_scale) {
                         q = 0;
                     } else {
                         float scaled = v / step;
