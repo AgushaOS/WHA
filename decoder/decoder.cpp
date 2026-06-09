@@ -52,7 +52,7 @@ static float half_to_float_fast(uint16_t h) {
 
 static int get_scale_bits(int band_idx) {
     if (band_idx < 2) return 16;
-    if (band_idx < 4) return 12;
+    if (band_idx < 4) return 16;
     return 8;
 }
 

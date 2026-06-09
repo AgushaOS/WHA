@@ -5,7 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
-
+#include <iomanip>
 
 inline float percentile85_abs(const std::vector<float>& arr) {
     if (arr.empty()) return 0.0f;
@@ -45,8 +45,8 @@ inline QuantResult quantize_levels(
     std::vector<std::vector<int32_t>> quantized_per_level(band_count);
 
     float deadzone_scale = 1.0f;
-    if (target_kbps > 256.0f) {
-        float t = (target_kbps - 256.0f) / (320.0f - 256.0f);
+    if (target_kbps > 192.0f) {
+        float t = (target_kbps - 192.0f) / (320.0f - 192.0f);
         t = std::clamp(t, 0.0f, 1.0f);
         deadzone_scale = 1.0f - std::pow(t, 1.5f);
     }
