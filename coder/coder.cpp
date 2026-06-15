@@ -292,7 +292,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     auto pack_steps = [&](const std::vector<float>& scales,
                           const std::vector<int>& bits,
                           const std::vector<bool>& active) {
-        const float LOG_MIN = -24.0f, LOG_MAX = 24.0f;
+        const float LOG_MIN = -6.0f, LOG_MAX = 6.0f;
         for (int i = 0; i < band_count; ++i) {
             if (!active[i]) continue;
             int sb = get_scale_bits(i); 
@@ -302,7 +302,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 header.push_back(h & 0xFF);
                 header.push_back((h >> 8) & 0xFF);
             } else {
-                float log_s = log2f(std::max(step, 1e-12f));
+                float log_s = log10f(std::max(step, 1e-12f));
                 int max_idx = (1 << sb) - 1;
                 int idx = (int)((log_s - LOG_MIN) * max_idx / (LOG_MAX - LOG_MIN));
                 idx = std::clamp(idx, 0, max_idx);
@@ -314,6 +314,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             }
         }
     };
+    
     pack_steps(qres0.scales, bits0, active0);
     if (stereo) pack_steps(qres1.scales, bits1, active1);
 

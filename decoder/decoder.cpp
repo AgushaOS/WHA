@@ -214,7 +214,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         std::vector<float> steps0(band_count, 0.0f), steps1(band_count, 0.0f);
         auto read_steps = [&](std::vector<float>& steps, const std::vector<int>& bits,
                               const std::vector<uint8_t>& active) {
-            const float LOG_MIN = -24.0f, LOG_MAX = 24.0f;
+            const float LOG_MIN = -6.0f, LOG_MAX = 6.0f;
             for (int i = 0; i < band_count; ++i) {
                 if (!active[i]) continue;
                 int sb = get_scale_bits(i);
@@ -231,7 +231,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                         ptr += 2;
                     }
                     float log_step = LOG_MIN + idx * (LOG_MAX - LOG_MIN) / ((1 << sb) - 1);
-                    steps[i] = exp2f(log_step);
+                    steps[i] = exp10f(log_step);
                 }
             }
         };
