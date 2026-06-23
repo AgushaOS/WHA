@@ -40,6 +40,8 @@ inline DualAllocResult allocate_bits_dual(
     global_score.resize(n);
     active.assign(n, 1);
 
+    // max_bits_in[0] = 0;
+
     if (target_kbps < 128) {
         bits0[0] = 4; bits1[0] = 4;
     } else {

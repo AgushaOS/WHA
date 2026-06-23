@@ -12,6 +12,46 @@ protected:
     mutable std::vector<float> scratch_ext_d;
     mutable std::vector<float> tmp;
 
+        void decompose_block(float* data, size_t N) const {
+        if (N < 2) return;
+        const size_t even_len = (N + 1) >> 1;
+        const size_t odd_len  = N >> 1;
+        if (tmp.size() < N) tmp.resize(N);
+        float* even = tmp.data();
+        float* odd  = tmp.data() + even_len;
+        for (size_t i = 0; i < even_len; ++i) even[i] = data[i << 1];
+        for (size_t i = 0; i < odd_len;  ++i) odd[i]  = data[(i << 1) + 1];
+        if (scratch_ext_e.size() < even_len + 6)
+            scratch_ext_e.resize(even_len + 6);
+        float* pe = scratch_ext_e.data() + 3;
+        std::memcpy(pe, even, even_len * sizeof(float));
+        pe[-1]=even[0]; pe[-2]=even[1]; pe[-3]=even[2];
+        pe[even_len]=even[even_len-1];
+        pe[even_len+1]=even[even_len-2];
+        pe[even_len+2]=even[even_len-3];
+        const float INV256 = 1.0f / 256.0f;
+        for (size_t i = 0; i < odd_len; ++i) {
+            float* p = pe + i;
+            float pred = (3*p[-2] -25*p[-1] +150*p[0] +150*p[1] -25*p[2] +3*p[3]) * INV256;
+            odd[i] -= pred;
+        }
+        if (scratch_ext_d.size() < odd_len + 4)
+            scratch_ext_d.resize(odd_len + 4);
+        float* pd = scratch_ext_d.data() + 2;
+        std::memcpy(pd, odd, odd_len * sizeof(float));
+        pd[-1]=odd[0]; pd[-2]=odd[1];
+        pd[odd_len]=odd[odd_len-1];
+        pd[odd_len+1]=odd[odd_len-2];
+        const float INV16 = 0.0625f;
+        for (size_t i = 0; i < even_len; ++i) {
+            float* p = pd + i;
+            even[i] += (-p[-2] +5*p[-1] +5*p[0] -p[1]) * INV16;
+        }
+        std::memcpy(data, even, even_len*sizeof(float));
+        std::memcpy(data + even_len, odd, odd_len*sizeof(float));
+    }
+
+
     void reconstruct_block(float* data, size_t N) const {
         if (N < 2) return;
         const size_t even_len = (N + 1) >> 1;
@@ -92,10 +132,12 @@ private:
 public:
     std::vector<float> iwpt(std::vector<std::vector<float>>& subbands, float sr, int levels) {
 
-        if (sr >= 44100) {
+        if (sr >= 40000) {
             for (size_t i = 12; i < subbands.size(); ++i) {
                 for (float& x : subbands[i]) x *= 4.0f;
             }
+            // for (float& x : subbands[12])
+            //         x /= 1.5f;
         }
         if (levels > 1) {
             int total = 1 << levels;

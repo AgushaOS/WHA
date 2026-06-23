@@ -50,9 +50,10 @@ static float half_to_float_fast(uint16_t h) {
     return half_to_float_table[h];
 }
 
-static int get_scale_bits(int band_idx) {
-    if (band_idx < 2) return 16;
-    if (band_idx < 4) return 16;
+static int get_scale_bits(int band_idx, float target_kbps) {
+    if (band_idx < 4) {
+        return 16;
+    }
     return 8;
 }
 
@@ -217,7 +218,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             const float LOG_MIN = -6.0f, LOG_MAX = 6.0f;
             for (int i = 0; i < band_count; ++i) {
                 if (!active[i]) continue;
-                int sb = get_scale_bits(i);
+                int sb = get_scale_bits(i, target_kbps);
                 if (sb == 17) {
                     uint16_t h = blk[ptr] | (blk[ptr + 1] << 8);
                     ptr += 2;

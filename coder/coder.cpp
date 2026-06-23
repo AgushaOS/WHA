@@ -38,13 +38,14 @@ struct EncoderSettings {
     int overlap = 48;
     bool enable_ms = true;
     int reservoir_max_factor = 1024;   
-    float default_target_kbps = 160.0f;
+    float default_target_kbps = 128.0f;
     bool verbose = false;
 } SETTINGS;
 
-static int get_scale_bits(int band_idx) {
-    if (band_idx < 2) return 16;
-    if (band_idx < 4) return 16;
+static int get_scale_bits(int band_idx, float target_kbps) {
+    if (band_idx < 4) {
+        return 16;
+    }
     return 8;
 }
 
@@ -116,8 +117,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
     int band_count = (int)coeff_counts.size();
 
-    uint8_t block_ver = (target_kbps < 320.0f) ? 9 : 8;
-    bool use_is = (stereo && target_kbps < 320.0f);
+    uint8_t block_ver = (target_kbps < 510.0f) ? 9 : 8;
+    bool use_is = (stereo && target_kbps < 510.0f);
 
     std::vector<uint8_t> mode_ms(band_count, 0);
     std::vector<std::vector<float>> ch0_bands(band_count);
@@ -142,7 +143,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             auto [mid, side] = mid_side(left_band, right_band);
             float Em = 0, Es = 0;
             for (int j = 0; j < n; ++j) { Em += mid[j]*mid[j]; Es += side[j]*side[j]; }
-            bool use_ms = use_mid_side(El, Er, Em, Es, enable_ms);
+            bool use_ms = use_mid_side(left_band, right_band, El, Er, Em, Es, enable_ms);
             if (use_ms) {
                 mode_ms[i] = 1;
                 ch0_bands[i] = std::move(mid);
@@ -166,7 +167,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             float r, sqrtE;
             bool inv_flag;
             std::vector<float> Y;
-            compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r, sqrtE, inv_flag);
+            compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r, sqrtE, inv_flag, i);
             is_r_vals[i] = r;
             is_inv_flags[i] = inv_flag;
             ch0_bands[i] = std::move(Y);
@@ -257,8 +258,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     int active_bands0 = std::count(active0.begin(), active0.end(), true);
     int active_bands1 = stereo ? std::count(active1.begin(), active1.end(), true) : 0;
     header_max += (active_bands0 + active_bands1 + 1) / 2;
-    for (int i = 0; i < band_count; ++i) if (active0[i]) header_max += (get_scale_bits(i) == 16 ? 2 : 1);
-    if (stereo) for (int i = 0; i < band_count; ++i) if (active1[i]) header_max += (get_scale_bits(i) == 16 ? 2 : 1);
+    for (int i = 0; i < band_count; ++i) if (active0[i]) header_max += (get_scale_bits(i, target_kbps) == 16 ? 2 : 1);
+    if (stereo) for (int i = 0; i < band_count; ++i) if (active1[i]) header_max += (get_scale_bits(i, target_kbps) == 16 ? 2 : 1);
     if (block_ver >= 9 && use_is && is_start_band < band_count) {
         int total_r_bits = 0;
         for (int i = is_start_band; i < band_count; ++i) total_r_bits += get_r_bits(i);
@@ -295,7 +296,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         const float LOG_MIN = -6.0f, LOG_MAX = 6.0f;
         for (int i = 0; i < band_count; ++i) {
             if (!active[i]) continue;
-            int sb = get_scale_bits(i); 
+            int sb = get_scale_bits(i, target_kbps); 
             float step = scale_and_bits_to_step(scales[i], bits[i]);
             if (sb == 17) {
                 uint16_t h = float_to_half(step);
@@ -305,7 +306,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 float log_s = log10f(std::max(step, 1e-12f));
                 int max_idx = (1 << sb) - 1;
                 int idx = (int)((log_s - LOG_MIN) * max_idx / (LOG_MAX - LOG_MIN));
+                // std::cout << idx - int(max_idx / 2) << ' ';
                 idx = std::clamp(idx, 0, max_idx);
+
                 if (sb == 8) header.push_back((uint8_t)idx);
                 else {
                     header.push_back((idx >> 8) & 0xFF);
@@ -316,7 +319,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     };
     
     pack_steps(qres0.scales, bits0, active0);
+    // std::cout << '\n';
     if (stereo) pack_steps(qres1.scales, bits1, active1);
+    // std::cout << '\n';
 
     if (block_ver >= 9 && use_is && is_start_band < band_count) {
         BitWriterMSB r_writer;
@@ -430,9 +435,9 @@ compress_audio(const std::string& input_path, const std::string& signal_type, fl
     uint32_t sr, channels;
     std::vector<float> raw = read_wav_f32(input_path, sr, channels);
 
-    if (sr >= 44100) {
-        SETTINGS.wpt_level = 4 + int(std::__lg(sr / 44100));
-        SETTINGS.block_samples = 1024 * int(sr / 44100);
+    if (sr >= 40000) {
+        SETTINGS.wpt_level = 4 + int(std::__lg(sr / 40000));
+        SETTINGS.block_samples = 1024 * int(sr / 40000);
         SETTINGS.overlap = 3 * (1 << SETTINGS.wpt_level);
     }
 
