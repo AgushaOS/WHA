@@ -129,7 +129,31 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
     return {mid, side};
 }
 
-inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms) {
+
+inline bool use_mid_side(float El, float Er,
+                         float Em, float Es,
+                         bool enable_ms) 
+{
+    if (!enable_ms) return false;
+    
+    const float eps = 1e-12f;
+    
+    if (El + Er < 1e-8f) return false;
+    
+    float ratio = Es / (Em + eps);
+    bool math_says_yes = (ratio < 0.35f);
+    
+    float min_e = std::min(El, Er);
+    float max_e = std::max(El, Er);
+    float energy_ratio = max_e / (min_e + eps);
+    
+    if (energy_ratio > 4.0f) return false;  
+    
+    return math_says_yes;
+}
+
+
+inline bool use_mid_side1(float El, float Er, float Em, float Es, bool enable_ms) {
     if (!enable_ms) return false;
     const float eps = 1e-12f;
     float prod_lr = El * Er;

@@ -129,12 +129,23 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
     return {mid, side};
 }
 
-inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms) {
+inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms, float target_kbps) {
     if (!enable_ms) return false;
     const float eps = 1e-12f;
+    
+    float min_e = std::min(El, Er);
+    float max_e = std::max(El, Er);
+    float energy_ratio = max_e / (min_e + eps);
+    
+    if (energy_ratio > 4.0f) return false;
+
+    if (Es > Em * 0.5f) return false;
+
+    
     float prod_lr = El * Er;
     float prod_ms = Em * Es;
-    return prod_ms < prod_lr - eps;
+    
+    return prod_ms < prod_lr * 0.95f;
 }
 
 #endif // JOINT_STEREO_H

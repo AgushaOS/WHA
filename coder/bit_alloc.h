@@ -134,6 +134,16 @@ inline DualAllocResult allocate_bits_dual(
     int new_reservoir = (used_bits <= total_bits_budget) ?
         std::min(reservoir_max, reservoir + (total_bits_budget - used_bits)) :
         std::max(0, reservoir - (used_bits - total_bits_budget));
+
+    // std::cout << "CH0 : \n";
+    // for (auto x : bits0) {
+    //     std::cout << x << ' ';
+    // }
+    // std::cout << "CH1 : \n";
+    // for (auto x : bits1) {
+    //     std::cout << x << ' ';
+    // }
+    // std::cout << '\n';
     return { bits0, bits1, used_bits, new_reservoir };
 }
 

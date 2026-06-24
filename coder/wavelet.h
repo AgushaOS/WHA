@@ -88,6 +88,7 @@ public:
             for (float& coeff : band) {
                 float absv = std::fabs(coeff);
                 coeff = std::copysign(fast_pow_075(absv), coeff);
+
             }
         if (levels > 1) {
             int total = 1 << levels;

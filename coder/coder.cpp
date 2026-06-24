@@ -43,9 +43,24 @@ struct EncoderSettings {
 } SETTINGS;
 
 static int get_scale_bits(int band_idx) {
-    if (band_idx < 2) return 16;
-    if (band_idx < 4) return 16;
+    if (band_idx < 1) return 12;
     return 8;
+}
+
+static int compute_optimal_rice_k(const std::vector<uint32_t>& vals, int max_k = 7) {
+    int best_k = 0;
+    size_t best_bits = SIZE_MAX;
+    for (int k = 0; k <= max_k; ++k) {
+        size_t total = 0;
+        for (uint32_t v : vals) {
+            total += (v >> k) + 1 + k; 
+        }
+        if (total < best_bits) {
+            best_bits = total;
+            best_k = k;
+        }
+    }
+    return best_k;
 }
 
 std::vector<float> read_wav_f32(const std::string &path, uint32_t &sr, uint32_t &channels) {
@@ -116,7 +131,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
     int band_count = (int)coeff_counts.size();
 
-    uint8_t block_ver = (target_kbps < 320.0f) ? 9 : 8;
+    uint8_t block_ver = 13;
     bool use_is = (stereo && target_kbps < 320.0f);
 
     std::vector<uint8_t> mode_ms(band_count, 0);
@@ -142,7 +157,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             auto [mid, side] = mid_side(left_band, right_band);
             float Em = 0, Es = 0;
             for (int j = 0; j < n; ++j) { Em += mid[j]*mid[j]; Es += side[j]*side[j]; }
-            bool use_ms = use_mid_side(El, Er, Em, Es, enable_ms);
+            bool use_ms = use_mid_side(El, Er, Em, Es, enable_ms, target_kbps);
             if (use_ms) {
                 mode_ms[i] = 1;
                 ch0_bands[i] = std::move(mid);
@@ -172,7 +187,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             ch0_bands[i] = std::move(Y);
             ch1_bands[i].clear();
         }
-        block_ver = 12;
+        block_ver = 13; 
     }
 
     std::vector<float> energy0(band_count, 0.0f), energy1(band_count, 0.0f);
@@ -200,12 +215,13 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
-    int bits_header = 4*8 + 8 + 8 + 8 + 8;
-    if (stereo) bits_header += 8 + ((band_count+7)/8)*8;
-    else bits_header += 8;
-    bits_header += ((band_count+7)/8)*8;
-    if (stereo) bits_header += ((band_count+7)/8)*8;
-    int header_bytes_est = (bits_header + 7)/8 + 4 + (band_count * 2);
+    int bits_header = 4*8 + 8 + 8; 
+    if (stereo) bits_header += ((band_count+7)/8)*8; 
+    else bits_header += 0;
+    bits_header += ((band_count+7)/8)*8; 
+    if (stereo) bits_header += ((band_count+7)/8)*8; 
+    bits_header += 8; 
+    int header_bytes_est = (bits_header + 7)/8 + 4; 
     if (block_ver >= 9 && use_is && is_start_band < band_count) {
         int total_r_bits = 0;
         for (int i = is_start_band; i < band_count; ++i) total_r_bits += get_r_bits(i);
@@ -252,31 +268,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             if (active1[i]) mask1[i / 8] |= (1 << (i % 8));
     }
 
-    size_t header_max = 4 + 1 + 3 + 1 + mode_bytes_vec.size() + mask0.size();
-    if (stereo) header_max += mask1.size();
-    int active_bands0 = std::count(active0.begin(), active0.end(), true);
-    int active_bands1 = stereo ? std::count(active1.begin(), active1.end(), true) : 0;
-    header_max += (active_bands0 + active_bands1 + 1) / 2;
-    for (int i = 0; i < band_count; ++i) if (active0[i]) header_max += (get_scale_bits(i) == 16 ? 2 : 1);
-    if (stereo) for (int i = 0; i < band_count; ++i) if (active1[i]) header_max += (get_scale_bits(i) == 16 ? 2 : 1);
-    if (block_ver >= 9 && use_is && is_start_band < band_count) {
-        int total_r_bits = 0;
-        for (int i = is_start_band; i < band_count; ++i) total_r_bits += get_r_bits(i);
-        header_max += (total_r_bits + 7) / 8;
-        if (block_ver >= 12) {
-            header_max += (band_count - is_start_band + 7) / 8;
-        }
-    }
-    header_max += 4;
-    header_max += 32; 
-    header.reserve(header_max);
-
     header.insert(header.end(), {'B','L','O','C'});
     header.push_back(block_ver);
-    header.push_back((uint8_t)band_count);
-    header.push_back((uint8_t)(stereo ? 2 : 1));
-    header.push_back((uint8_t)level);
-    header.push_back((uint8_t)mode_bytes_vec.size());
+    header.push_back((uint8_t)mode_bytes_vec.size()); 
     header.insert(header.end(), mode_bytes_vec.begin(), mode_bytes_vec.end());
     header.insert(header.end(), mask0.begin(), mask0.end());
     if (stereo) header.insert(header.end(), mask1.begin(), mask1.end());
@@ -289,34 +283,73 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         qres1 = quantize_levels(for_quant1, bits1, target_kbps);
     }
 
-    auto pack_steps = [&](const std::vector<float>& scales,
-                          const std::vector<int>& bits,
-                          const std::vector<bool>& active) {
-        const float LOG_MIN = -6.0f, LOG_MAX = 6.0f;
-        for (int i = 0; i < band_count; ++i) {
-            if (!active[i]) continue;
-            int sb = get_scale_bits(i); 
-            float step = scale_and_bits_to_step(scales[i], bits[i]);
-            if (sb == 17) {
-                uint16_t h = float_to_half(step);
-                header.push_back(h & 0xFF);
-                header.push_back((h >> 8) & 0xFF);
-            } else {
-                float log_s = log10f(std::max(step, 1e-12f));
-                int max_idx = (1 << sb) - 1;
-                int idx = (int)((log_s - LOG_MIN) * max_idx / (LOG_MAX - LOG_MIN));
-                idx = std::clamp(idx, 0, max_idx);
-                if (sb == 8) header.push_back((uint8_t)idx);
-                else {
-                    header.push_back((idx >> 8) & 0xFF);
-                    header.push_back(idx & 0xFF);
-                }
-            }
-        }
+    const float LOG_MIN = -6.0f;   
+    const float LOG_MAX =  0.0f;   
+
+    auto get_scale_idx = [&](float step, int sb) -> uint32_t {
+        if (step <= 0) return 0;
+        float log_s = log10f(std::max(step, 1e-12f));
+        int max_idx = (1 << sb) - 1;
+        int idx = (int)((log_s - LOG_MIN) * max_idx / (LOG_MAX - LOG_MIN));
+        idx = std::clamp(idx, 0, max_idx);
+        return (uint32_t)idx;
     };
-    
-    pack_steps(qres0.scales, bits0, active0);
-    if (stereo) pack_steps(qres1.scales, bits1, active1);
+
+    std::vector<uint32_t> scale_indices0, scale_indices1;
+    for (int i = 0; i < band_count; ++i) {
+        if (active0[i]) {
+            int sb = get_scale_bits(i);
+            float step = scale_and_bits_to_step(qres0.scales[i], bits0[i]);
+            uint32_t idx = get_scale_idx(step, sb);
+            scale_indices0.push_back(idx);
+        }
+        if (stereo && active1[i]) {
+            int sb = get_scale_bits(i);
+            float step = scale_and_bits_to_step(qres1.scales[i], bits1[i]);
+            uint32_t idx = get_scale_idx(step, sb);
+            scale_indices1.push_back(idx);
+        }
+    }
+
+    int k_scale0 = compute_optimal_rice_k(scale_indices0);
+    int k_scale1 = stereo ? compute_optimal_rice_k(scale_indices1) : 0;
+
+    uint8_t k_scale_byte = (uint8_t)(k_scale0 & 0x07);
+    if (stereo) k_scale_byte |= ((k_scale1 & 0x07) << 3);
+    header.push_back(k_scale_byte);
+
+    BitWriterMSB payload_writer;
+
+    for (uint32_t idx : scale_indices0) {
+        rice_encode(payload_writer, std::vector<uint32_t>{idx}, k_scale0);
+    }
+    if (stereo) {
+        for (uint32_t idx : scale_indices1) {
+            rice_encode(payload_writer, std::vector<uint32_t>{idx}, k_scale1);
+        }
+    }
+
+    for (int i = 0; i < band_count; ++i) {
+        if (!active0[i] || bits0[i] <= 0) continue;
+        const auto& qvals = qres0.quantized_per_level[i];
+        std::vector<uint32_t> uvals(qvals.size());
+        for (size_t j = 0; j < qvals.size(); ++j) uvals[j] = zigzag_encode(qvals[j]);
+        int k_sub = compute_optimal_rice_k(uvals); 
+        payload_writer.write_bits(k_sub, 3);
+        rice_encode(payload_writer, uvals, k_sub);
+    }
+
+    if (stereo) {
+        for (int i = 0; i < band_count; ++i) {
+            if (!active1[i] || bits1[i] <= 0) continue;
+            const auto& qvals = qres1.quantized_per_level[i];
+            std::vector<uint32_t> uvals(qvals.size());
+            for (size_t j = 0; j < qvals.size(); ++j) uvals[j] = zigzag_encode(qvals[j]);
+            int k_sub = compute_optimal_rice_k(uvals);
+            payload_writer.write_bits(k_sub, 3);
+            rice_encode(payload_writer, uvals, k_sub);
+        }
+    }
 
     if (block_ver >= 9 && use_is && is_start_band < band_count) {
         BitWriterMSB r_writer;
@@ -337,53 +370,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
-    std::vector<int> orders0(band_count, 0), orders1(band_count, 0);
-    auto apply_lpc_to_bands = [&](std::vector<std::vector<int32_t>>& quantized,
-                                  const std::vector<bool>& active,
-                                  const std::vector<int>& bits,
-                                  std::vector<int>& orders,
-                                  bool is_side) {
-        for (int l = 0; l < band_count; ++l) {
-            if (!active[l] || bits[l] <= 0) continue;
-            if (use_is && l >= is_start_band && !is_side) {
-                orders[l] = 0;
-                continue;
-            }
-            auto& vec = quantized[l];
-            if (vec.empty()) continue;
-            int best_order = select_best_order(vec, l);
-            orders[l] = best_order;
-            vec = apply_lpc(vec, best_order);
-        }
-    };
-    apply_lpc_to_bands(qres0.quantized_per_level, active0, bits0, orders0, false);
-    if (stereo) apply_lpc_to_bands(qres1.quantized_per_level, active1, bits1, orders1, true);
-
-    BitWriterMSB payload_writer;
-    for (int l = 0; l < band_count; ++l) {
-        if (active0[l] && bits0[l] > 0) {
-            if (!(use_is && l >= is_start_band)) payload_writer.write_bits(orders0[l], 2);
-            const auto& qvals = qres0.quantized_per_level[l];
-            std::vector<uint32_t> uvals(qvals.size());
-            for (size_t i = 0; i < qvals.size(); ++i) uvals[i] = zigzag_encode(qvals[i]);
-            int k = rice_optimal_k(uvals);
-            payload_writer.write_bits(k, 4);
-            rice_encode(payload_writer, uvals, k);
-        }
-    }
-    if (stereo) {
-        for (int l = 0; l < band_count; ++l) {
-            if (active1[l] && bits1[l] > 0) {
-                payload_writer.write_bits(orders1[l], 2);
-                const auto& qvals = qres1.quantized_per_level[l];
-                std::vector<uint32_t> uvals(qvals.size());
-                for (size_t i = 0; i < qvals.size(); ++i) uvals[i] = zigzag_encode(qvals[i]);
-                int k = rice_optimal_k(uvals);
-                payload_writer.write_bits(k, 4);
-                rice_encode(payload_writer, uvals, k);
-            }
-        }
-    }
     payload_writer.flush();
     std::vector<uint8_t> payload = payload_writer.data();
     uint32_t payload_len = (uint32_t)payload.size();
@@ -479,7 +465,7 @@ compress_audio(const std::string& input_path, const std::string& signal_type, fl
             }
         }
         auto comp = compress_block_adaptive_joint(block, wpt, num_channels, SETTINGS.wpt_level,
-                                                  effective_budget, target_kbps, sr, N, 12,
+                                                  effective_budget, target_kbps, sr, N, 13,
                                                   SETTINGS.enable_ms);
         int real_bits = (int)comp.size() * 8;
         reservoir += target_bits_per_block - real_bits;
