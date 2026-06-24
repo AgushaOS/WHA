@@ -50,10 +50,8 @@ static float half_to_float_fast(uint16_t h) {
     return half_to_float_table[h];
 }
 
-static int get_scale_bits(int band_idx, float target_kbps) {
-    if (band_idx < 4) {
-        return 16;
-    }
+static int get_scale_bits(int band_idx) {
+    if (band_idx < 1) return 12;
     return 8;
 }
 
@@ -119,7 +117,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
     uint8_t version = read_u8(f);
     if (version != 12)
-        throw std::runtime_error("Unsupported container version (only v12 with IS inversion is supported)");
+        throw std::runtime_error("Unsupported container version (only v12)");
 
     uint32_t sr = read_u32(f);
     uint8_t num_channels = read_u8(f);
@@ -128,6 +126,9 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
     uint32_t overlap = read_u32(f);
     uint32_t block_count = read_u32(f);
     float target_kbps = read_f32(f);
+
+    std::vector<int> band_shapes = compute_band_shapes(block_size, wpt_level);
+    int expected_band_count = static_cast<int>(band_shapes.size());
 
     int L = overlap;
     int hop = block_size - L;
@@ -149,11 +150,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         }
     }
 
-    std::vector<int> band_shapes = compute_band_shapes(block_size, wpt_level);
-    int expected_band_count = static_cast<int>(band_shapes.size());
-
     PWPT wpt;
-    std::vector<int32_t> residuals, quantized;
     std::vector<std::vector<float>> ch0_bands(expected_band_count);
     std::vector<std::vector<float>> ch1_bands(expected_band_count);
     std::vector<std::vector<float>> recon_chs;
@@ -171,85 +168,55 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         ptr += 4;
         need(1);
         uint8_t block_ver = blk[ptr++];
-        need(3);
-        uint8_t band_count = blk[ptr++];
-        uint8_t block_ch = blk[ptr++];
-        uint8_t block_lvl = blk[ptr++];
-        if (band_count != expected_band_count) throw std::runtime_error("Band count mismatch");
+        if (block_ver != 13)
+            throw std::runtime_error("Unsupported block version (only v13 with new format)");
 
         need(1);
         uint8_t mode_bytes = blk[ptr++];
-        std::vector<uint8_t> mode_ms(band_count, 0);
+        std::vector<uint8_t> mode_ms(expected_band_count, 0);
         if (mode_bytes > 0) {
-            for (int i = 0; i < band_count; ++i) {
+            for (int i = 0; i < expected_band_count; ++i) {
                 uint8_t byte = blk[ptr + (i >> 3)];
                 mode_ms[i] = (byte >> (i & 7)) & 1;
             }
             ptr += mode_bytes;
         }
 
-        int mask_bytes = (band_count + 7) >> 3;
-        std::vector<uint8_t> active0(band_count, 0);
-        for (int i = 0; i < band_count; ++i) {
+        int mask_bytes = (expected_band_count + 7) >> 3;
+        std::vector<uint8_t> active0(expected_band_count, 0);
+        for (int i = 0; i < expected_band_count; ++i) {
             uint8_t byte = blk[ptr + (i >> 3)];
             active0[i] = (byte >> (i & 7)) & 1;
         }
         ptr += mask_bytes;
 
         std::vector<uint8_t> active1;
-        if (block_ch == 2) {
-            active1.assign(band_count, 0);
-            for (int i = 0; i < band_count; ++i) {
+        bool stereo = (num_channels == 2);
+        if (stereo) {
+            active1.assign(expected_band_count, 0);
+            for (int i = 0; i < expected_band_count; ++i) {
                 uint8_t byte = blk[ptr + (i >> 3)];
                 active1[i] = (byte >> (i & 7)) & 1;
             }
             ptr += mask_bytes;
         }
 
-        std::vector<int> bits0(band_count, 0), bits1(band_count, 0);
-        for (int i = 0; i < band_count; ++i) {
-            if (active0[i]) bits0[i] = 1;  
-            if (active1[i]) bits1[i] = 1;
-        }
+        need(1);
+        uint8_t k_scale_byte = blk[ptr++];
+        int k_scale0 = k_scale_byte & 0x07;
+        int k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
 
-        std::vector<float> steps0(band_count, 0.0f), steps1(band_count, 0.0f);
-        auto read_steps = [&](std::vector<float>& steps, const std::vector<int>& bits,
-                              const std::vector<uint8_t>& active) {
-            const float LOG_MIN = -6.0f, LOG_MAX = 6.0f;
-            for (int i = 0; i < band_count; ++i) {
-                if (!active[i]) continue;
-                int sb = get_scale_bits(i, target_kbps);
-                if (sb == 17) {
-                    uint16_t h = blk[ptr] | (blk[ptr + 1] << 8);
-                    ptr += 2;
-                    steps[i] = half_to_float_fast(h);
-                } else {
-                    int idx;
-                    if (sb == 8) {
-                        idx = blk[ptr++];
-                    } else {
-                        idx = (blk[ptr] << 8) | blk[ptr + 1];
-                        ptr += 2;
-                    }
-                    float log_step = LOG_MIN + idx * (LOG_MAX - LOG_MIN) / ((1 << sb) - 1);
-                    steps[i] = exp10f(log_step);
-                }
-            }
-        };
-        read_steps(steps0, bits0, active0);
-        if (block_ch == 2) read_steps(steps1, bits1, active1);
-
-        std::vector<float> is_r(band_count, 0.5f);
-        std::vector<bool> is_inv(band_count, false);   
-        if (block_ver >= 9 && block_ch == 2) {
+        std::vector<float> is_r(expected_band_count, 0.5f);
+        std::vector<bool> is_inv(expected_band_count, false);
+        if (block_ver >= 9 && stereo && target_kbps < 320.0f) {
             int is_start = get_is_start_band(target_kbps);
-            if (is_start < band_count) {
+            if (is_start < expected_band_count) {
                 int total_bits = 0;
-                for (int i = is_start; i < band_count; ++i) total_bits += get_r_bits(i);
+                for (int i = is_start; i < expected_band_count; ++i) total_bits += get_r_bits(i);
                 int total_bytes = (total_bits + 7) / 8;
                 if (ptr + total_bytes > blk.size()) throw std::runtime_error("Not enough data for r");
                 BitReaderMSB r_reader(blk.data() + ptr, total_bytes);
-                for (int i = is_start; i < band_count; ++i) {
+                for (int i = is_start; i < expected_band_count; ++i) {
                     int bits = get_r_bits(i);
                     uint32_t q = r_reader.read_bits(bits);
                     is_r[i] = dequantize_r(q, bits);
@@ -257,10 +224,10 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 ptr += total_bytes;
 
                 if (block_ver >= 12) {
-                    int inv_bytes = (band_count - is_start + 7) / 8;
+                    int inv_bytes = (expected_band_count - is_start + 7) / 8;
                     if (ptr + inv_bytes > blk.size()) throw std::runtime_error("Not enough data for inv mask");
-                    std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, band_count - is_start);
-                    for (int i = is_start; i < band_count; ++i) {
+                    std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, expected_band_count - is_start);
+                    for (int i = is_start; i < expected_band_count; ++i) {
                         is_inv[i] = inv_tmp[i - is_start];
                     }
                     ptr += inv_bytes;
@@ -272,69 +239,87 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         uint32_t payload_len;
         memcpy(&payload_len, &blk[ptr], 4);
         ptr += 4;
+
         BitReaderMSB payload_reader(blk.data() + ptr, payload_len);
 
-        for (int ib = 0; ib < band_count; ++ib) {
-            ch0_bands[ib].clear();
-            ch1_bands[ib].clear();
+        const float LOG_MIN = -6.0f;
+        const float LOG_MAX =  0.0f;
+        std::vector<float> steps0(expected_band_count, 0.0f);
+        std::vector<float> steps1(expected_band_count, 0.0f);
+
+        auto decode_scales = [&](std::vector<float>& steps, const std::vector<uint8_t>& active, int k_scale) {
+            for (int i = 0; i < expected_band_count; ++i) {
+                if (!active[i]) continue;
+                auto idx_vec = rice_decode(payload_reader, 1, k_scale);
+                if (idx_vec.empty()) throw std::runtime_error("Scale index missing");
+                uint32_t idx = idx_vec[0];
+                int sb = get_scale_bits(i);
+                int max_idx = (1 << sb) - 1;
+                float log_step = LOG_MIN + idx * (LOG_MAX - LOG_MIN) / max_idx;
+                steps[i] = exp10f(log_step);
+            }
+        };
+
+        decode_scales(steps0, active0, k_scale0);
+        if (stereo) decode_scales(steps1, active1, k_scale1);
+
+        std::vector<std::vector<int32_t>> quant0(expected_band_count);
+        for (int i = 0; i < expected_band_count; ++i) {
+            if (!active0[i]) continue;
+            int k_sub = (int)payload_reader.read_bits(3);
+            auto uvals = rice_decode(payload_reader, band_shapes[i], k_sub);
+            quant0[i].resize(uvals.size());
+            for (size_t j = 0; j < uvals.size(); ++j)
+                quant0[i][j] = zigzag_decode(uvals[j]);
         }
 
-        for (int ib = 0; ib < band_count; ++ib) {
-            if (active0[ib]) {
-                int order = 0;
-                if (!(block_ver >= 9 && ib >= get_is_start_band(target_kbps) && block_ch == 2)) {
-                    order = (int)payload_reader.read_bits(2);
-                }
-                int k = payload_reader.read_bits(4);
-                auto uvals = rice_decode(payload_reader, band_shapes[ib], k);
-                residuals.resize(uvals.size());
-                for (size_t i = 0; i < uvals.size(); ++i)
-                    residuals[i] = zigzag_decode(uvals[i]);
-                apply_inverse_lpc(residuals, order, quantized);
-                dequantize_band(quantized, steps0[ib], ch0_bands[ib]);
+        std::vector<std::vector<int32_t>> quant1;
+        if (stereo) {
+            quant1.resize(expected_band_count);
+            for (int i = 0; i < expected_band_count; ++i) {
+                if (!active1[i]) continue;
+                int k_sub = (int)payload_reader.read_bits(3);
+                auto uvals = rice_decode(payload_reader, band_shapes[i], k_sub);
+                quant1[i].resize(uvals.size());
+                for (size_t j = 0; j < uvals.size(); ++j)
+                    quant1[i][j] = zigzag_decode(uvals[j]);
+            }
+        }
+
+        for (int i = 0; i < expected_band_count; ++i) {
+            if (active0[i]) {
+                dequantize_band(quant0[i], steps0[i], ch0_bands[i]);
             } else {
-                ch0_bands[ib].assign(band_shapes[ib], 0.0f);
+                ch0_bands[i].assign(band_shapes[i], 0.0f);
+            }
+            if (stereo && active1[i]) {
+                dequantize_band(quant1[i], steps1[i], ch1_bands[i]);
+            } else if (stereo) {
+                ch1_bands[i].assign(band_shapes[i], 0.0f);
             }
         }
 
-        if (block_ch == 2) {
-            for (int ib = 0; ib < band_count; ++ib) {
-                if (active1[ib]) {
-                    int order = (int)payload_reader.read_bits(2);
-                    int k = payload_reader.read_bits(4);
-                    auto uvals = rice_decode(payload_reader, band_shapes[ib], k);
-                    residuals.resize(uvals.size());
-                    for (size_t i = 0; i < uvals.size(); ++i)
-                        residuals[i] = zigzag_decode(uvals[i]);
-                    apply_inverse_lpc(residuals, order, quantized);
-                    dequantize_band(quantized, steps1[ib], ch1_bands[ib]);
-                } else {
-                    ch1_bands[ib].assign(band_shapes[ib], 0.0f);
-                }
-            }
-        }
-
-        if (block_ch == 2 && num_channels == 2) {
+        if (stereo && num_channels == 2) {
             int is_start = get_is_start_band(target_kbps);
-            for (int ib = 0; ib < band_count; ++ib) {
-                if (mode_ms[ib]) {
-                    if (block_ver >= 9 && ib >= is_start && is_start < band_count) {
+            for (int i = 0; i < expected_band_count; ++i) {
+                if (mode_ms[i]) {
+                    if (block_ver >= 9 && i >= is_start && is_start < expected_band_count) {
                         std::vector<float> left, right;
-                        apply_is(ch0_bands[ib], is_r[ib], is_inv[ib], left, right);
-                        ch0_bands[ib] = std::move(left);
-                        ch1_bands[ib] = std::move(right);
+                        apply_is(ch0_bands[i], is_r[i], is_inv[i], left, right);
+                        ch0_bands[i] = std::move(left);
+                        ch1_bands[i] = std::move(right);
                     } else {
                         std::vector<float> left_tmp, right_tmp;
-                        ms_to_lr(ch0_bands[ib], ch1_bands[ib], left_tmp, right_tmp);
-                        ch0_bands[ib] = std::move(left_tmp);
-                        ch1_bands[ib] = std::move(right_tmp);
+                        ms_to_lr(ch0_bands[i], ch1_bands[i], left_tmp, right_tmp);
+                        ch0_bands[i] = std::move(left_tmp);
+                        ch1_bands[i] = std::move(right_tmp);
                     }
                 }
             }
         }
 
-        recon_chs.resize(block_ch);
-        for (int ch = 0; ch < block_ch; ++ch) {
+        recon_chs.resize(num_channels);
+        for (int ch = 0; ch < num_channels; ++ch) {
             auto& bands = (ch == 0) ? ch0_bands : ch1_bands;
             auto rec = wpt.iwpt(bands, sr, wpt_level);
             if (rec.size() < block_size) rec.resize(block_size, 0.0f);

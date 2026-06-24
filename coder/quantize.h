@@ -78,7 +78,6 @@ inline QuantResult quantize_levels(
             }
             float p85 = percentile85_abs(abs_vals);
             const float THRESH = 3.5f;
-            // max_abs = max_abs / 2;
             max_abs = (max_abs > THRESH * p85) ? max_abs / 2.0f : p85;
         } else {
             for (int ch = 0; ch < num_channels; ++ch) {
@@ -144,4 +143,3 @@ inline QuantResult quantize_levels(
 }
 
 #endif // QUANTIZE_H
-

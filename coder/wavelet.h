@@ -88,6 +88,7 @@ public:
             for (float& coeff : band) {
                 float absv = std::fabs(coeff);
                 coeff = std::copysign(fast_pow_075(absv), coeff);
+
             }
         if (levels > 1) {
             int total = 1 << levels;
@@ -97,11 +98,10 @@ public:
                 ordered[perm[i]] = std::move(subbands[i]);
             subbands = std::move(ordered);
         }
-        if (sr >= 40000) {
-            for (size_t i = 12; i < subbands.size(); ++i) {
+        if (sr >= 44100) {
+            for (size_t i = 12; i < subbands.size(); ++i)
                 for (float& x : subbands[i])
                     x *= 0.25f;
-            }
         }
         return subbands;
     }
