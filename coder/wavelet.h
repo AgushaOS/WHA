@@ -14,41 +14,97 @@ protected:
 
     void decompose_block(float* data, size_t N) const {
         if (N < 2) return;
+
         const size_t even_len = (N + 1) >> 1;
         const size_t odd_len  = N >> 1;
-        if (tmp.size() < N) tmp.resize(N);
+
+        if (tmp.size() < N)
+            tmp.resize(N);
+
         float* even = tmp.data();
         float* odd  = tmp.data() + even_len;
-        for (size_t i = 0; i < even_len; ++i) even[i] = data[i << 1];
-        for (size_t i = 0; i < odd_len;  ++i) odd[i]  = data[(i << 1) + 1];
-        if (scratch_ext_e.size() < even_len + 6)
-            scratch_ext_e.resize(even_len + 6);
-        float* pe = scratch_ext_e.data() + 3;
+
+        for (size_t i = 0; i < even_len; ++i)
+            even[i] = data[i << 1];
+
+        for (size_t i = 0; i < odd_len; ++i)
+            odd[i] = data[(i << 1) + 1];
+
+        if (scratch_ext_e.size() < even_len + 12)
+            scratch_ext_e.resize(even_len + 12);
+
+        float* pe = scratch_ext_e.data() + 6;
+
         std::memcpy(pe, even, even_len * sizeof(float));
-        pe[-1]=even[0]; pe[-2]=even[1]; pe[-3]=even[2];
-        pe[even_len]=even[even_len-1];
-        pe[even_len+1]=even[even_len-2];
-        pe[even_len+2]=even[even_len-3];
-        const float INV256 = 1.0f / 256.0f;
+
+        pe[-1] = even[0];
+        pe[-2] = even[1];
+        pe[-3] = even[2];
+        pe[-4] = even[3];
+        pe[-5] = even[4];
+        pe[-6] = even[5];
+
+        pe[even_len]     = even[even_len - 1];
+        pe[even_len + 1] = even[even_len - 2];
+        pe[even_len + 2] = even[even_len - 3];
+        pe[even_len + 3] = even[even_len - 4];
+        pe[even_len + 4] = even[even_len - 5];
+        pe[even_len + 5] = even[even_len - 6];
+
+        constexpr float C0 = -0.0001201630f;  
+        constexpr float C1 =  0.0016155243f;  
+        constexpr float C2 = -0.0103855133f;  
+        constexpr float C3 =  0.0436191559f;  
+        constexpr float C4 = -0.1453971863f; 
+        constexpr float C5 =  0.6106681824f;
+
         for (size_t i = 0; i < odd_len; ++i) {
             float* p = pe + i;
-            float pred = (3*p[-2] -25*p[-1] +150*p[0] +150*p[1] -25*p[2] +3*p[3]) * INV256;
+
+            float pred =
+                C0 * (p[-5] + p[6]) +
+                C1 * (p[-4] + p[5]) +
+                C2 * (p[-3] + p[4]) +
+                C3 * (p[-2] + p[3]) +
+                C4 * (p[-1] + p[2]) +
+                C5 * (p[0]  + p[1]);
+
             odd[i] -= pred;
         }
-        if (scratch_ext_d.size() < odd_len + 4)
-            scratch_ext_d.resize(odd_len + 4);
-        float* pd = scratch_ext_d.data() + 2;
+
+        if (scratch_ext_d.size() < odd_len + 6)
+            scratch_ext_d.resize(odd_len + 6);
+
+        float* pd = scratch_ext_d.data() + 3;
+
         std::memcpy(pd, odd, odd_len * sizeof(float));
-        pd[-1]=odd[0]; pd[-2]=odd[1];
-        pd[odd_len]=odd[odd_len-1];
-        pd[odd_len+1]=odd[odd_len-2];
-        const float INV16 = 0.0625f;
+
+        pd[-1] = odd[0];
+        pd[-2] = odd[1];
+        pd[-3] = odd[2];
+
+        pd[odd_len]     = odd[odd_len - 1];
+        pd[odd_len + 1] = odd[odd_len - 2];
+        pd[odd_len + 2] = odd[odd_len - 3];
+
+        constexpr float INV64 = 1.0f / 64.0f;
+
         for (size_t i = 0; i < even_len; ++i) {
             float* p = pd + i;
-            even[i] += (-p[-2] +5*p[-1] +5*p[0] -p[1]) * INV16;
+
+            float upd =
+                (  1.0f * p[-3]
+                 - 6.0f * p[-2]
+                 +21.0f * p[-1]
+                 +21.0f * p[0]
+                 - 6.0f * p[1]
+                 + 1.0f * p[2]) * INV64;
+
+            even[i] += upd;
         }
-        std::memcpy(data, even, even_len*sizeof(float));
-        std::memcpy(data + even_len, odd, odd_len*sizeof(float));
+
+        std::memcpy(data, even, even_len * sizeof(float));
+        std::memcpy(data + even_len, odd, odd_len * sizeof(float));
     }
 
 public:

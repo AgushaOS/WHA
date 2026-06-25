@@ -139,7 +139,7 @@ inline DualAllocResult allocate_bits_dual(
     // for (auto x : bits0) {
     //     std::cout << x << ' ';
     // }
-    // std::cout << "CH1 : \n";
+    // std::cout << "\nCH1 : \n";
     // for (auto x : bits1) {
     //     std::cout << x << ' ';
     // }

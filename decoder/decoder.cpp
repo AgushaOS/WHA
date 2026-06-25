@@ -208,7 +208,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
         std::vector<float> is_r(expected_band_count, 0.5f);
         std::vector<bool> is_inv(expected_band_count, false);
-        if (block_ver >= 9 && stereo && target_kbps < 320.0f) {
+        if (block_ver >= 9 && stereo && target_kbps < 510.0f) {
             int is_start = get_is_start_band(target_kbps);
             if (is_start < expected_band_count) {
                 int total_bits = 0;
