@@ -5,7 +5,6 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
-#include <iomanip>
 
 inline float percentile85_abs(const std::vector<float>& arr) {
     if (arr.empty()) return 0.0f;
@@ -16,14 +15,14 @@ inline float percentile85_abs(const std::vector<float>& arr) {
     return tmp[idx];
 }
 
-inline float compute_energy_adaptive_deadzone(float step, float rms) {
+inline float compute_powerlaw_deadzone(float step, float rms) {
     if (step < 1e-12f) return 0.0f;
     
     float energy_ratio = rms / step;
     
-    float mult = 0.50f + 0.15f * std::log2f(1.0f + energy_ratio);
+    float mult = 0.55f + 0.10f * std::log2f(1.0f + energy_ratio);
     
-    mult = std::clamp(mult, 0.45f, 0.75f);
+    mult = std::clamp(mult, 0.50f, 0.70f);
     
     return mult * step;
 }
@@ -108,7 +107,8 @@ inline QuantResult quantize_levels(
             }
         }
         float rms = std::sqrt(sum_sq / static_cast<float>(total_samples) + 1e-12f);
-        float deadzone = compute_energy_adaptive_deadzone(step, rms);
+        
+        float deadzone = compute_powerlaw_deadzone(step, rms);
 
         std::vector<int32_t> quantized;
         quantized.reserve(total_samples);

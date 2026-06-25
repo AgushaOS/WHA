@@ -132,7 +132,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     int band_count = (int)coeff_counts.size();
 
     uint8_t block_ver = 13;
-    bool use_is = (stereo && target_kbps < 320.0f);
+    bool use_is = (stereo && target_kbps < 510.0f);
 
     std::vector<uint8_t> mode_ms(band_count, 0);
     std::vector<std::vector<float>> ch0_bands(band_count);
