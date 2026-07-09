@@ -21,8 +21,8 @@ inline int get_is_start_band(float target_kbps) {
     if (target_kbps < 128.0f) return 4;
     if (target_kbps < 160.0f) return 4;
     if (target_kbps < 190.0f) return 8;
-    if (target_kbps < 224.0f) return 14; 
-    if (target_kbps < 510.0f) return 16;
+    if (target_kbps < 224.0f) return 14;
+    if (target_kbps < 510.0f) return 16; 
     return 999;
 }
 
@@ -111,12 +111,22 @@ inline void apply_is(const std::vector<float>& Y, float r, bool inv_flag,
 }
 
 inline uint32_t quantize_r(float r, int bits) {
+    float r_clamped = std::clamp(r, 0.0f, 1.0f);
+    float theta = std::asin(std::sqrt(r_clamped));  
+    
     int max_val = (1 << bits) - 1;
-    return static_cast<uint32_t>(std::clamp(r, 0.0f, 1.0f) * max_val + 0.5f);
+    float theta_norm = theta / (float)(M_PI * 0.5f);  
+    
+    return static_cast<uint32_t>(std::clamp(theta_norm, 0.0f, 1.0f) * max_val + 0.5f);
 }
 
 inline float dequantize_r(uint32_t q, int bits) {
-    return q / (float)((1 << bits) - 1);
+    int max_val = (1 << bits) - 1;
+    float theta_norm = (float)q / max_val;
+    float theta = theta_norm * (float)(M_PI * 0.5f);
+    
+    float s = std::sin(theta);
+    return s * s;
 }
 
 inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vector<float>& left, const std::vector<float>& right) {
@@ -129,36 +139,23 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
     return {mid, side};
 }
 
-
-inline bool use_mid_side(float El, float Er,
-                         float Em, float Es,
-                         bool enable_ms) 
-{
+inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms, float target_kbps) {
     if (!enable_ms) return false;
-    
     const float eps = 1e-12f;
-    
-    if (El + Er < 1e-8f) return false;
-    
-    float ratio = Es / (Em + eps);
-    bool math_says_yes = (ratio < 0.35f);
     
     float min_e = std::min(El, Er);
     float max_e = std::max(El, Er);
     float energy_ratio = max_e / (min_e + eps);
     
-    if (energy_ratio > 4.0f) return false;  
+    if (energy_ratio > 4.0f) return false;
+
+    if (Es > Em * 0.5f) return false;
+
     
-    return math_says_yes;
-}
-
-
-inline bool use_mid_side1(float El, float Er, float Em, float Es, bool enable_ms) {
-    if (!enable_ms) return false;
-    const float eps = 1e-12f;
     float prod_lr = El * Er;
     float prod_ms = Em * Es;
-    return prod_ms < prod_lr - eps;
+    
+    return prod_ms < prod_lr * 0.95f;
 }
 
 #endif // JOINT_STEREO_H

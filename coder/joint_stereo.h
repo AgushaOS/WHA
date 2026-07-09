@@ -111,12 +111,22 @@ inline void apply_is(const std::vector<float>& Y, float r, bool inv_flag,
 }
 
 inline uint32_t quantize_r(float r, int bits) {
+    float r_clamped = std::clamp(r, 0.0f, 1.0f);
+    float theta = std::asin(std::sqrt(r_clamped));  
+    
     int max_val = (1 << bits) - 1;
-    return static_cast<uint32_t>(std::clamp(r, 0.0f, 1.0f) * max_val + 0.5f);
+    float theta_norm = theta / (float)(M_PI * 0.5f);  
+    
+    return static_cast<uint32_t>(std::clamp(theta_norm, 0.0f, 1.0f) * max_val + 0.5f);
 }
 
 inline float dequantize_r(uint32_t q, int bits) {
-    return q / (float)((1 << bits) - 1);
+    int max_val = (1 << bits) - 1;
+    float theta_norm = (float)q / max_val;
+    float theta = theta_norm * (float)(M_PI * 0.5f);
+    
+    float s = std::sin(theta);
+    return s * s;
 }
 
 inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vector<float>& left, const std::vector<float>& right) {

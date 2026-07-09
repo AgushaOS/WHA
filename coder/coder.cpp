@@ -164,8 +164,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 ch1_bands[i] = std::move(side);
             } else {
                 mode_ms[i] = 0;
-                ch0_bands[i] = left_band;
-                ch1_bands[i] = right_band;
+                ch0_bands[i] = std::move(left_band);
+                ch1_bands[i] = std::move(right_band);
             }
         }
     } else {
@@ -184,8 +184,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r, sqrtE, inv_flag);
             is_r_vals[i] = r;
             is_inv_flags[i] = inv_flag;
-            ch0_bands[i] = std::move(Y);
-            ch1_bands[i].clear();
+            ch0_bands[i] = Y;
+            ch1_bands[i] = Y;
+            // ch1_bands[i].clear();
         }
         block_ver = 13; 
     }
