@@ -1,4 +1,3 @@
-
 inline std::vector<float> compute_channel_priority(
     const std::vector<std::vector<float>>& coeffs,
     std::vector<std::vector<float>>& prev_coeffs,
@@ -22,7 +21,7 @@ inline std::vector<float> compute_channel_priority(
         for (float v : band)
             global_energy += v * v;
 
-    global_energy = std::sqrt(global_energy + eps);
+    float global_energy_sq = global_energy + eps;
 
     int total_bands = 1 << level;
 
@@ -72,7 +71,7 @@ inline std::vector<float> compute_channel_priority(
             abs_energy += v * v;
 
         float energy_local =
-            std::sqrt(abs_energy + eps) / (global_energy + eps);
+            std::sqrt(abs_energy + eps) / (std::sqrt(global_energy_sq) + eps);
 
         energy_local = std::clamp(energy_local, 0.0f, 1.0f);
 
@@ -132,11 +131,30 @@ inline std::vector<float> compute_channel_priority(
             inter_scale = std::clamp(inter_scale, 0.0f, 1.0f);
         }
 
+        float cur_peak = max_v;  
+        
+        float prev_peak = 0.0f;
+        for (float v : prev)
+            prev_peak = std::max(prev_peak, std::fabs(v));
+
+        constexpr float PEAK_THRESHOLD = 0.01f;  
+        
+        float transient = 0.0f;
+        
+        if (cur_peak > PEAK_THRESHOLD && prev_peak > PEAK_THRESHOLD) {
+            float peak_ratio = cur_peak / prev_peak;
+            
+            transient = std::log2(peak_ratio + 1.0f);
+            
+            transient = std::clamp(transient, 0.0f, 4.0f);
+        }
+
         float p_val =
             0.35f * predict +        
             0.55f * sparsity +       
             0.20f * structure +      
-            0.20f * inter_scale;     
+            0.20f * inter_scale +    
+            transient;
 
         p_val *= freq_weight[i];
         p_val = std::tanh(1.3f * p_val);
@@ -149,11 +167,11 @@ inline std::vector<float> compute_channel_priority(
     if (prev_priority.size() != priority.size())
         prev_priority = priority;
 
-    for (int i = 0; i < band_count; ++i)
+    for (int i = 0; i < band_count; ++i) {
         priority[i] =
-            0.70f * priority[i] +
-            0.30f * prev_priority[i];
-
+            0.70f * priority[i] +            
+             0.30f * prev_priority[i];
+    }
     prev_priority = priority;
     prev_coeffs = coeffs;
 
@@ -168,3 +186,7 @@ inline std::vector<float> compute_channel_priority(
 
     return priority;
 }
+
+
+
+

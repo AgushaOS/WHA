@@ -53,8 +53,8 @@ inline DualAllocResult allocate_bits_dual(
         s2_1[i] = energy1[i] * inv;
         float sp0 = 0.5f * priority0[i];
         float sp1 = 0.5f * priority1[i];
-        if (i > 0) { sp0 += 0.25f * priority0[i-1]; sp1 += 0.25f * priority1[i-1]; }
-        if (i < n-1) { sp0 += 0.25f * priority0[i+1]; sp1 += 0.25f * priority1[i+1]; }
+        // if (i > 0) { sp0 += 0.25f * priority0[i-1]; sp1 += 0.25f * priority1[i-1]; }
+        // if (i < n-1) { sp0 += 0.25f * priority0[i+1]; sp1 += 0.25f * priority1[i+1]; }
         factor0[i] = s2_0[i] * std::pow(std::max(sp0, eps), 0.6f);
         factor1[i] = s2_1[i] * std::pow(std::max(sp1, eps), 0.6f);
         global_score[i] = (factor0[i] + factor1[i]) * std::sqrt((float)coeff_counts[i]);
