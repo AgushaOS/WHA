@@ -187,6 +187,3 @@ inline std::vector<float> compute_channel_priority(
     return priority;
 }
 
-
-
-
