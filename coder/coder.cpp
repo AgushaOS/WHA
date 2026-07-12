@@ -40,6 +40,8 @@ struct EncoderSettings {
     int reservoir_max_factor = 1024;   
     float default_target_kbps = 160.0f;
     bool verbose = false;
+    float transient_ratio_threshold = 0.15f;
+    float power_law_exponent = 0.75f;
 } SETTINGS;
 
 static int get_scale_bits(int band_idx) {
@@ -93,6 +95,23 @@ static float scale_and_bits_to_step(float scale, int bits) {
     if (bits <= 0) return 0.0f;
     int max_int = (bits > 1) ? ((1 << (bits - 1)) - 1) : 1;
     return scale / max_int;
+}
+
+static bool detect_strong_transient(const std::vector<float>& energy0,
+                                    const std::vector<float>& energy1,
+                                    int band_count,
+                                    bool stereo,
+                                    float threshold) {
+    if (band_count < 3) return false;
+    float total = 0.0f, high = 0.0f;
+    int high_start = band_count / 4; 
+    for (int i = 0; i < band_count; ++i) {
+        float e = energy0[i] + (stereo ? energy1[i] : 0.0f);
+        total += e;
+        if (i >= high_start) high += e;
+    }
+    if (total < 1e-12f) return false;
+    return ((high / total) > 0.15);
 }
 
 std::vector<uint8_t> compress_block_adaptive_joint(
@@ -196,6 +215,39 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         for (float v : ch0_bands[i]) energy0[i] += v * v;
         for (float v : ch1_bands[i]) energy1[i] += v * v;
     }
+
+    bool has_transient = detect_strong_transient(energy0, energy1, band_count, stereo,
+                                                 SETTINGS.transient_ratio_threshold);
+
+    if (!has_transient) {
+        float exp;
+        if (target_kbps <= 128.0f) {
+            exp = 0.75f;
+        } else if (target_kbps >= 192.0f) {
+            exp = 0.95f;
+        } else {
+            exp = 0.75f + (0.95f - 0.75f) * (target_kbps - 128.0f) / (192.0f - 128.0f);
+        }
+        exp = std::clamp(exp, 0.5f, 1.0f); 
+
+        float max_energy = 0;
+
+        for (int i = 0; i < band_count; i++) {
+            max_energy = std::max({max_energy, energy0[i], energy1[i]});
+        }
+
+        for (int i = 0; i < band_count; ++i) {
+            if (energy0[i] / max_energy > 1e-5) {
+                energy0[i] = std::pow(energy0[i], exp);
+            }
+            if (stereo) {
+                if (energy1[i] / max_energy > 1e-5) {
+                    energy1[i] = std::pow(energy1[i], exp);
+                }
+            }
+        }
+    }
+
     static std::vector<std::vector<float>> prev_ch0, prev_ch1;
     std::vector<float> priority0, priority1;
     if (stereo) {
