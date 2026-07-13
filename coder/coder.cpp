@@ -216,6 +216,11 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         for (float v : ch1_bands[i]) energy1[i] += v * v;
     }
 
+    for (int i = 0; i < band_count; i++) {
+        energy0[i] = std::pow(energy0[i], 0.75);
+        energy1[i] = std::pow(energy1[i], 0.75);
+    }
+
     bool has_transient = detect_strong_transient(energy0, energy1, band_count, stereo,
                                                  SETTINGS.transient_ratio_threshold);
 
