@@ -149,10 +149,10 @@ public:
         const int total_bands = 1 << levels;
         const size_t band_size = N >> levels;  
 
-        for (float& x : data) {
-            float absv = std::fabs(x);
-            x = std::copysign(fast_pow_075(absv), x);
-        }
+        // for (float& x : data) {
+        //     float absv = std::fabs(x);
+        //     x = std::copysign(fast_pow_075(absv), x);
+        // }
 
         if (levels > 1) {
             auto perm = gray_permutation(levels);

@@ -144,12 +144,12 @@ public:
                 reordered[i] = std::move(subbands[perm[i]]);
             subbands = std::move(reordered);
         }
-        for (auto& band : subbands) {
-            for (float& coeff : band) {
-                float absv = std::fabs(coeff);
-                coeff = std::copysign(fast_pow_1333(absv), coeff);
-            }
-        }
+        // for (auto& band : subbands) {
+        //     for (float& coeff : band) {
+        //         float absv = std::fabs(coeff);
+        //         coeff = std::copysign(fast_pow_1333(absv), coeff);
+        //     }
+        // }
         return wpt_reconstruct(subbands, levels);
     }
 };
