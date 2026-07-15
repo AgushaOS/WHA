@@ -8,18 +8,19 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
-
+#include <chrono>
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
-
 #include "wavelet.h"
 #include "entropy_decoder.h"
 #include "dequantize.h"
 #include "joint_stereo.h"
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 static std::array<float, 65536> half_to_float_table;
 static bool half_table_initialized = false;
-
 static void init_half_table() {
     if (half_table_initialized) return;
     for (uint32_t i = 0; i < 65536; ++i) {
@@ -45,16 +46,13 @@ static void init_half_table() {
     }
     half_table_initialized = true;
 }
-
 static float half_to_float_fast(uint16_t h) {
     return half_to_float_table[h];
 }
-
 static int get_scale_bits(int band_idx) {
     if (band_idx < 1) return 12;
     return 8;
 }
-
 static uint8_t read_u8(std::ifstream &f) {
     uint8_t v = 0;
     f.read((char*)&v, 1);
@@ -80,7 +78,6 @@ static std::vector<uint8_t> read_n(std::ifstream &f, size_t n) {
     if (got < n) buf.resize(got);
     return buf;
 }
-
 static std::vector<int> compute_band_shapes(int block_size, int level) {
     std::vector<int> shapes = {block_size};
     for (int l = 0; l < level; ++l) {
@@ -94,7 +91,6 @@ static std::vector<int> compute_band_shapes(int block_size, int level) {
     }
     return shapes;
 }
-
 static std::vector<bool> unpack_bits(const uint8_t* data, int bytes, int total_bits) {
     std::vector<bool> bits(total_bits, false);
     for (int i = 0; i < total_bits; ++i) {
@@ -107,18 +103,17 @@ static std::vector<bool> unpack_bits(const uint8_t* data, int bytes, int total_b
 
 void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav) {
     init_half_table();
-
     std::ifstream f(in_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + in_wha);
-
+    
     auto magic = read_n(f, 4);
     if (magic.size() != 4 || std::string((char*)magic.data(), 4) != "WHA1")
         throw std::runtime_error("Not a WHA container");
-
+    
     uint8_t version = read_u8(f);
-    if (version != 12)
-        throw std::runtime_error("Unsupported container version (only v12)");
-
+    if (version != 13)  
+        throw std::runtime_error("Unsupported container version (only v13)");
+    
     uint32_t sr = read_u32(f);
     uint8_t num_channels = read_u8(f);
     uint8_t wpt_level = read_u8(f);
@@ -126,16 +121,18 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
     uint32_t overlap = read_u32(f);
     uint32_t block_count = read_u32(f);
     float target_kbps = read_f32(f);
-
+    
+    uint8_t block_format_version = read_u8(f);
+    if (block_format_version != 14)
+        throw std::runtime_error("Unsupported block format version (only v14)");
+    
     std::vector<int> band_shapes = compute_band_shapes(block_size, wpt_level);
     int expected_band_count = static_cast<int>(band_shapes.size());
-
     int L = overlap;
     int hop = block_size - L;
     int total_samples_estimate = hop * (block_count - 1) + block_size;
     std::vector<float> accum(total_samples_estimate * num_channels, 0.0f);
     std::vector<float> weight(total_samples_estimate * num_channels, 0.0f);
-
     std::vector<float> window(block_size, 1.0f);
     std::vector<float> window_sq(block_size, 1.0f);
     int edge = L;
@@ -149,39 +146,28 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             window_sq[block_size - 1 - i] = w * w;
         }
     }
-
     PWPT wpt;
     std::vector<std::vector<float>> ch0_bands(expected_band_count);
     std::vector<std::vector<float>> ch1_bands(expected_band_count);
     std::vector<std::vector<float>> recon_chs;
-
+    
     for (uint32_t bi = 0; bi < block_count; ++bi) {
         uint32_t block_len = read_u32(f);
         std::vector<uint8_t> blk(block_len);
         f.read((char*)blk.data(), block_len);
         if ((size_t)f.gcount() < block_len) throw std::runtime_error("Block truncated");
-
+        
         size_t ptr = 0;
         auto need = [&](size_t n) { if (ptr + n > blk.size()) throw std::runtime_error("Block truncated"); };
-        need(4);
-        if (std::memcmp(blk.data() + ptr, "BLOC", 4) != 0) throw std::runtime_error("Block magic missing");
-        ptr += 4;
-        need(1);
-        uint8_t block_ver = blk[ptr++];
-        if (block_ver != 13)
-            throw std::runtime_error("Unsupported block version (only v13 with new format)");
-
-        need(1);
-        uint8_t mode_bytes = blk[ptr++];
+        
+        int mode_bytes = (expected_band_count + 7) / 8;  
         std::vector<uint8_t> mode_ms(expected_band_count, 0);
-        if (mode_bytes > 0) {
-            for (int i = 0; i < expected_band_count; ++i) {
-                uint8_t byte = blk[ptr + (i >> 3)];
-                mode_ms[i] = (byte >> (i & 7)) & 1;
-            }
-            ptr += mode_bytes;
+        for (int i = 0; i < expected_band_count; ++i) {
+            uint8_t byte = blk[ptr + (i >> 3)];
+            mode_ms[i] = (byte >> (i & 7)) & 1;
         }
-
+        ptr += mode_bytes;
+        
         int mask_bytes = (expected_band_count + 7) >> 3;
         std::vector<uint8_t> active0(expected_band_count, 0);
         for (int i = 0; i < expected_band_count; ++i) {
@@ -189,7 +175,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             active0[i] = (byte >> (i & 7)) & 1;
         }
         ptr += mask_bytes;
-
         std::vector<uint8_t> active1;
         bool stereo = (num_channels == 2);
         if (stereo) {
@@ -200,15 +185,13 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             }
             ptr += mask_bytes;
         }
-
         need(1);
         uint8_t k_scale_byte = blk[ptr++];
         int k_scale0 = k_scale_byte & 0x07;
         int k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
-
         std::vector<float> is_r(expected_band_count, 0.5f);
         std::vector<bool> is_inv(expected_band_count, false);
-        if (block_ver >= 9 && stereo && target_kbps < 510.0f) {
+        if (block_format_version >= 14 && stereo && target_kbps < 510.0f) {
             int is_start = get_is_start_band(target_kbps);
             if (is_start < expected_band_count) {
                 int total_bits = 0;
@@ -222,31 +205,26 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                     is_r[i] = dequantize_r(q, bits);
                 }
                 ptr += total_bytes;
-
-                if (block_ver >= 12) {
-                    int inv_bytes = (expected_band_count - is_start + 7) / 8;
-                    if (ptr + inv_bytes > blk.size()) throw std::runtime_error("Not enough data for inv mask");
-                    std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, expected_band_count - is_start);
-                    for (int i = is_start; i < expected_band_count; ++i) {
-                        is_inv[i] = inv_tmp[i - is_start];
-                    }
-                    ptr += inv_bytes;
+                int inv_bytes = (expected_band_count - is_start + 7) / 8;
+                if (ptr + inv_bytes > blk.size()) throw std::runtime_error("Not enough data for inv mask");
+                std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, expected_band_count - is_start);
+                for (int i = is_start; i < expected_band_count; ++i) {
+                    is_inv[i] = inv_tmp[i - is_start];
                 }
+                ptr += inv_bytes;
             }
         }
-
-        need(4);
-        uint32_t payload_len;
-        memcpy(&payload_len, &blk[ptr], 4);
-        ptr += 4;
-
+        
+        need(2);
+        uint16_t payload_len;
+        memcpy(&payload_len, &blk[ptr], 2);
+        ptr += 2;
+        
         BitReaderMSB payload_reader(blk.data() + ptr, payload_len);
-
         const float LOG_MIN = -6.0f;
         const float LOG_MAX =  0.0f;
         std::vector<float> steps0(expected_band_count, 0.0f);
         std::vector<float> steps1(expected_band_count, 0.0f);
-
         auto decode_scales = [&](std::vector<float>& steps, const std::vector<uint8_t>& active, int k_scale) {
             for (int i = 0; i < expected_band_count; ++i) {
                 if (!active[i]) continue;
@@ -259,10 +237,8 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 steps[i] = exp10f(log_step);
             }
         };
-
         decode_scales(steps0, active0, k_scale0);
         if (stereo) decode_scales(steps1, active1, k_scale1);
-
         std::vector<std::vector<int32_t>> quant0(expected_band_count);
         for (int i = 0; i < expected_band_count; ++i) {
             if (!active0[i]) continue;
@@ -272,7 +248,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             for (size_t j = 0; j < uvals.size(); ++j)
                 quant0[i][j] = zigzag_decode(uvals[j]);
         }
-
         std::vector<std::vector<int32_t>> quant1;
         if (stereo) {
             quant1.resize(expected_band_count);
@@ -285,7 +260,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                     quant1[i][j] = zigzag_decode(uvals[j]);
             }
         }
-
         for (int i = 0; i < expected_band_count; ++i) {
             if (active0[i]) {
                 dequantize_band(quant0[i], steps0[i], ch0_bands[i]);
@@ -298,12 +272,11 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 ch1_bands[i].assign(band_shapes[i], 0.0f);
             }
         }
-
         if (stereo && num_channels == 2) {
             int is_start = get_is_start_band(target_kbps);
             for (int i = 0; i < expected_band_count; ++i) {
                 if (mode_ms[i]) {
-                    if (block_ver >= 9 && i >= is_start && is_start < expected_band_count) {
+                    if (block_format_version >= 14 && i >= is_start && is_start < expected_band_count) {
                         std::vector<float> left, right;
                         apply_is(ch0_bands[i], is_r[i], is_inv[i], left, right);
                         ch0_bands[i] = std::move(left);
@@ -317,7 +290,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 }
             }
         }
-
         recon_chs.resize(num_channels);
         for (int ch = 0; ch < num_channels; ++ch) {
             auto& bands = (ch == 0) ? ch0_bands : ch1_bands;
@@ -326,7 +298,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             else rec.resize(block_size);
             recon_chs[ch] = std::move(rec);
         }
-
         for (int ch = 0; ch < num_channels; ++ch) {
             int src_ch = (ch < (int)recon_chs.size()) ? ch : 0;
             const float* src = recon_chs[src_ch].data();
@@ -339,14 +310,12 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             }
         }
     }
-
     size_t total_frames = accum.size() / num_channels;
     std::vector<float> out_interleaved(accum.size());
     for (size_t i = 0; i < accum.size(); ++i) {
         if (weight[i] > 1e-9f) out_interleaved[i] = accum[i] / weight[i];
         else out_interleaved[i] = 0.0f;
     }
-
     drwav_data_format fmt;
     fmt.container = drwav_container_riff;
     fmt.format = DR_WAVE_FORMAT_IEEE_FLOAT;
@@ -364,13 +333,31 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
               << ", overlap=" << L << ")\n";
 }
 
+#include <sys/resource.h>
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: decoder <input.wha> <output.wav>\n";
         return 1;
     }
     try {
+        struct rusage usage_before, usage_after;
+        getrusage(RUSAGE_SELF, &usage_before);
+        
         decompress_wha_to_wav(argv[1], argv[2]);
+        
+        getrusage(RUSAGE_SELF, &usage_after);
+        double user_time_sec = (usage_after.ru_utime.tv_sec - usage_before.ru_utime.tv_sec) +
+                               (usage_after.ru_utime.tv_usec - usage_before.ru_utime.tv_usec) / 1000000.0;
+        
+        drwav wav_info;
+        if (drwav_init_file(&wav_info, argv[2], nullptr)) {
+            double duration = (double)wav_info.totalPCMFrameCount / (double)wav_info.sampleRate;
+            double speed = (user_time_sec > 0.0) ? (duration / user_time_sec) : 0.0;
+            std::cout << "Decoding speed: " << speed << "x realtime ("
+                      << user_time_sec << "s user time)\n";
+            drwav_uninit(&wav_info);
+        }
     } catch (const std::exception& ex) {
         std::cerr << "ERROR: " << ex.what() << "\n";
         return 2;
