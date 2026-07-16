@@ -25,7 +25,8 @@ inline DualAllocResult allocate_bits_dual(
     std::vector<float>& energy1,
     int reservoir,
     int reservoir_max,
-    float target_kbps)
+    float target_kbps,
+    bool stereo)
 {
     const int n = static_cast<int>(priority0.size());
     const float eps = 1e-12f;
@@ -40,10 +41,41 @@ inline DualAllocResult allocate_bits_dual(
     global_score.resize(n);
     active.assign(n, 1);
 
-    if (target_kbps < 128) {
-        bits0[0] = 4; bits1[0] = 4;
+    if (stereo) {
+        if (target_kbps < 128) {
+
+            if (target_kbps >= 96) {
+                if (energy0[0] > energy1[0]) {
+                    bits0[0] = 4;
+                    bits1[0] = 3;
+                } else {
+                    bits0[0] = 3;
+                    bits1[0] = 4; 
+                }
+            } else {
+                if (energy0[0] > energy1[0]) {
+                    bits0[0] = 3;
+                    bits1[0] = 3;
+                } else {
+                    bits0[0] = 3;
+                    bits1[0] = 3; 
+                }
+            }
+        } else {
+            if (energy0[0] > energy1[0]) {
+                bits0[0] = 5;
+                bits1[0] = 4;
+            } else {
+                bits1[0] = 5;
+                bits0[0] = 4; 
+            }
+        }
     } else {
-        bits0[0] = 5; bits1[0] = 4;
+        if (target_kbps <= 64) {
+            bits0[0] = 4;
+        } else {
+            bits0[0] = 5;
+        }
     }
 
     for (int i = 0; i < n; i++) {

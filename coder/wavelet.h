@@ -141,7 +141,8 @@ public:
     std::vector<std::vector<float>> wpt(const std::vector<float>& signal,
                                         int levels,
                                         float bitrate,
-                                        int sr) {
+                                        int sr, 
+                                        int channels) {
         std::vector<float> data = signal;
         wpt_decompose(data, levels);
 
@@ -174,6 +175,22 @@ public:
                 float* end   = begin + band_size;
                 for (float* p = begin; p != end; ++p)
                     *p *= 0.25f;
+            }
+            if (bitrate / float(channels) < 48) {
+                for (int i = 8; i < total_bands; ++i) {
+                float* begin = data.data() + i * band_size;
+                float* end   = begin + band_size;
+                for (float* p = begin; p != end; ++p)
+                    *p *= 0.0f;
+                }
+            }
+            if (bitrate / float(channels) < 32) {
+                for (int i = 4; i < total_bands; ++i) {
+                float* begin = data.data() + i * band_size;
+                float* end   = begin + band_size;
+                for (float* p = begin; p != end; ++p)
+                    *p *= 0.0f;
+                }
             }
         }
 

@@ -28,6 +28,7 @@ inline int get_is_start_band(float target_kbps) {
 }
 
 inline int get_r_bits(int band_idx) {
+    return 4;
     if (band_idx < 4) return 6;
     if (band_idx < 8) return 5;
     return 4;

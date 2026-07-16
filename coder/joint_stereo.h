@@ -28,6 +28,7 @@ inline int get_is_start_band(float target_kbps) {
 }
 
 inline int get_r_bits(int band_idx) {
+    return 4;
     if (band_idx < 4) return 6;
     if (band_idx < 8) return 5;
     return 4;
@@ -38,7 +39,8 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
                                      std::vector<float>& Y,
                                      float& r,
                                      float& sqrtE,
-                                     bool& inv_flag)
+                                     bool& inv_flag,
+                                     int idx)
 {
     const size_t n = left.size();
 

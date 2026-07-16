@@ -137,13 +137,13 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             left[i] = block[i * 2];
             right[i] = block[i * 2 + 1];
         }
-        left_coeffs = wpt.wpt(left, level, target_kbps, sr);
-        right_coeffs = wpt.wpt(right, level, target_kbps, sr);
+        left_coeffs = wpt.wpt(left, level, target_kbps, sr, num_channels);
+        right_coeffs = wpt.wpt(right, level, target_kbps, sr, num_channels);
         coeff_counts.resize(left_coeffs.size());
         for (size_t i = 0; i < left_coeffs.size(); ++i)
             coeff_counts[i] = (int)left_coeffs[i].size();
     } else {
-        left_coeffs = wpt.wpt(block, level, target_kbps, sr);
+        left_coeffs = wpt.wpt(block, level, target_kbps, sr, num_channels);
         coeff_counts.resize(left_coeffs.size());
         for (size_t i = 0; i < left_coeffs.size(); ++i)
             coeff_counts[i] = (int)left_coeffs[i].size();
@@ -194,7 +194,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             float r, sqrtE;
             bool inv_flag;
             std::vector<float> Y;
-            compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r, sqrtE, inv_flag);
+            compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r, sqrtE, inv_flag, i);
             is_r_vals[i] = r;
             is_inv_flags[i] = inv_flag;
             ch0_bands[i] = Y;
@@ -276,7 +276,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     int reservoir_max = int(payload_budget * SETTINGS.reservoir_max_factor);
     DualAllocResult alloc = allocate_bits_dual(
         priority0, priority1, coeff_counts, payload_budget,
-        min_bits, max_bits, energy0, energy1, 0, reservoir_max, target_kbps);
+        min_bits, max_bits, energy0, energy1, 0, reservoir_max, target_kbps, num_channels == 2);
     std::vector<int> bits0 = alloc.bits0;
     std::vector<int> bits1 = alloc.bits1;
     if (use_is && is_start_band < band_count) {
@@ -436,7 +436,11 @@ compress_audio(const std::string& input_path, const std::string& signal_type, fl
     if (sr >= 44100) {
         SETTINGS.wpt_level = 4 + int(std::__lg(sr / 44100));
         SETTINGS.block_samples = 1024 * int(sr / 44100);
-        SETTINGS.overlap = 3 * (1 << SETTINGS.wpt_level);
+        SETTINGS.overlap = 48;3 * (1 << SETTINGS.wpt_level);
+
+        if (target_kbps_in < 128) {
+            SETTINGS.overlap /= 2;
+        }
     }
     int num_channels = (int)channels;
     int N = SETTINGS.block_samples;
