@@ -54,14 +54,14 @@ protected:
         pe[even_len + 6] = even[even_len - 7];
         pe[even_len + 7] = even[even_len - 8];
 
-        constexpr float C0 = -0.0000063926f;  
-        constexpr float C1 =  0.0001106411f;   
-        constexpr float C2 = -0.0009153038f;   
-        constexpr float C3 =  0.0048477203f;   
-        constexpr float C4 = -0.0186983496f;   
-        constexpr float C5 =  0.0575909168f;   
-        constexpr float C6 = -0.1599747688f;   
-        constexpr float C7 =  0.6170455217f;   
+        constexpr float C0 = -0.0000063926f;
+        constexpr float C1 =  0.0001106411f;
+        constexpr float C2 = -0.0009153038f;
+        constexpr float C3 =  0.0048477203f;
+        constexpr float C4 = -0.0186983496f;
+        constexpr float C5 =  0.0575909168f;
+        constexpr float C6 = -0.1599747688f;
+        constexpr float C7 =  0.6170455217f;
 
         for (size_t i = 0; i < odd_len; ++i) {
             float* __restrict p = pe + i;
@@ -128,7 +128,6 @@ private:
         float s = std::sqrt(x);
         return s * std::sqrt(s);
     }
-
     std::vector<int> gray_permutation(int level) const {
         int n = 1 << level;
         std::vector<int> perm(n);
@@ -136,29 +135,21 @@ private:
             perm[i] = i ^ (i >> 1);
         return perm;
     }
-
 public:
     std::vector<std::vector<float>> wpt(const std::vector<float>& signal,
                                         int levels,
                                         float bitrate,
-                                        int sr, 
+                                        int sr,
                                         int channels) {
         std::vector<float> data = signal;
         wpt_decompose(data, levels);
-
         const size_t N = data.size();
         const int total_bands = 1 << levels;
-        const size_t band_size = N >> levels;  
-
-        // for (float& x : data) {
-        //     float absv = std::fabs(x);
-        //     x = std::copysign(fast_pow_075(absv), x);
-        // }
+        const size_t band_size = N >> levels;
 
         if (levels > 1) {
             auto perm = gray_permutation(levels);
             std::vector<float> ordered(N);
-
             for (int i = 0; i < total_bands; ++i) {
                 const size_t src = i * band_size;
                 const size_t dst = perm[i] * band_size;
@@ -170,28 +161,33 @@ public:
         }
 
         if (sr >= 44100) {
-            for (int i = 12; i < total_bands; ++i) {
+            int atten_start = total_bands * 3 / 4;
+            for (int i = atten_start; i < total_bands; ++i) {
                 float* begin = data.data() + i * band_size;
-                float* end   = begin + band_size;
+                float* end = begin + band_size;
                 for (float* p = begin; p != end; ++p)
                     *p *= 0.25f;
             }
-            if (bitrate / float(channels) < 48) {
-                for (int i = 8; i < total_bands; ++i) {
-                float* begin = data.data() + i * band_size;
-                float* end   = begin + band_size;
-                for (float* p = begin; p != end; ++p)
-                    *p *= 0.0f;
-                }
-            }
-            if (bitrate / float(channels) < 32) {
-                for (int i = 4; i < total_bands; ++i) {
-                float* begin = data.data() + i * band_size;
-                float* end   = begin + band_size;
-                for (float* p = begin; p != end; ++p)
-                    *p *= 0.0f;
-                }
-            }
+
+            // int cutoff_mid = total_bands * 5 / 8;
+            // if (bitrate / float(channels) < 48.0f) {
+            //     for (int i = cutoff_mid; i < total_bands; ++i) {
+            //         float* begin = data.data() + i * band_size;
+            //         float* end = begin + band_size;
+            //         for (float* p = begin; p != end; ++p)
+            //             *p *= 0.0f;
+            //     }
+            // }
+
+            // int cutoff_low = total_bands / 4;
+            // if (bitrate / float(channels) < 32.0f) {
+            //     for (int i = cutoff_low; i < total_bands; ++i) {
+            //         float* begin = data.data() + i * band_size;
+            //         float* end = begin + band_size;
+            //         for (float* p = begin; p != end; ++p)
+            //             *p *= 0.0f;
+            //     }
+            // }
         }
 
         std::vector<std::vector<float>> tree(total_bands);
