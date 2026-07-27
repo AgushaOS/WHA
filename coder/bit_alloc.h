@@ -31,6 +31,16 @@ inline DualAllocResult allocate_bits_dual(
     const int n = static_cast<int>(priority0.size());
     const float eps = 1e-12f;
 
+    if (target_kbps / (stereo ? 2 : 1) < 64) { 
+        for (auto& x : energy1) {
+            x *= 0.70;
+        }
+        // for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
+        //     energy0[i] *= 0.5;
+        // }
+    }
+
+
     static thread_local std::vector<int> bits0, bits1, max_b, active;
     static thread_local std::vector<float> s2_0, s2_1, factor0, factor1, global_score;
     bits0.assign(min_bits_in.begin(), min_bits_in.end());
@@ -45,6 +55,8 @@ inline DualAllocResult allocate_bits_dual(
         if (target_kbps < 128) {
 
             if (target_kbps >= 96) {
+                // bits0[0] = 4;
+                // bits1[0] = 3;
                 if (energy0[0] > energy1[0]) {
                     bits0[0] = 4;
                     bits1[0] = 3;
@@ -53,13 +65,16 @@ inline DualAllocResult allocate_bits_dual(
                     bits1[0] = 4; 
                 }
             } else {
-                if (energy0[0] > energy1[0]) {
-                    bits0[0] = 3;
-                    bits1[0] = 3;
-                } else {
-                    bits0[0] = 3;
-                    bits1[0] = 3; 
-                }
+                bits0[0] = 4;
+                // bits1[0] = 3;
+                // bits1[0] = 3;
+                // if (energy0[0] > energy1[0]) {
+                //     bits0[0] = 4;
+                //     // bits1[0] = 3;
+                // } else {
+                //     // bits0[0] = 4;
+                //     bits1[0] = 4; 
+                // }
             }
         } else {
             if (energy0[0] > energy1[0]) {

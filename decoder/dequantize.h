@@ -13,6 +13,7 @@ inline void dequantize_band(
     out_band.resize(quantized.size());
     for (size_t i = 0; i < quantized.size(); ++i)
         out_band[i] = quantized[i] * step;
+    // std::cout << step << '\n';
 }
 
 #endif // DEQUANTIZE_H

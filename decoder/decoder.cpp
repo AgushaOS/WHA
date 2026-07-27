@@ -142,9 +142,23 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         int left_overlap = (prev_block_size == 2048) ? (int)(96 * overlap_factor) : (int)(48 * overlap_factor);
         int hop = block_size - right_overlap;
         
+        int total_bands = 1 << level;              
         std::vector<int> band_shapes = compute_band_shapes(block_size, level);
-        int expected_band_count = static_cast<int>(band_shapes.size());
-        int total_bands = 1 << level;
+        if ((int)band_shapes.size() != total_bands) {
+            band_shapes.clear();
+            std::vector<int> sizes = {block_size};
+            for (int l = 0; l < level; ++l) {
+                std::vector<int> new_sizes;
+                new_sizes.reserve(sizes.size() * 2);
+                for (int s : sizes) {
+                    new_sizes.push_back((s + 1) >> 1);
+                    new_sizes.push_back(s >> 1);
+                }
+                sizes = std::move(new_sizes);
+            }
+            band_shapes = std::move(sizes);
+        }
+        int expected_band_count = total_bands;     
         
         std::vector<float> window(block_size, 1.0f);
         std::vector<float> window_sq(block_size, 1.0f);
@@ -199,10 +213,21 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         uint8_t k_scale_byte = blk[ptr++];
         int k_scale0 = k_scale_byte & 0x07;
         int k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
+        
+        need(2);
+        uint16_t payload_len;
+        memcpy(&payload_len, &blk[ptr], 2);
+        ptr += 2;
+        if (ptr + payload_len > blk.size()) throw std::runtime_error("Payload truncated");
+        BitReaderMSB payload_reader(blk.data() + ptr, payload_len);
+        ptr += payload_len;  
+
         std::vector<std::array<float, 4>> is_r(expected_band_count);
         for (auto& a : is_r) a.fill(0.5f);
         std::vector<bool> is_inv(expected_band_count, false);
         std::vector<bool> is_use_segmented(expected_band_count, false);
+        bool is_used = false;
+
         if (block_format_version >= 17 && stereo && target_kbps < 510.0f) {
             int is_start = get_is_start_band(target_kbps, total_bands);
             if (is_start < expected_band_count) {
@@ -214,39 +239,38 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                     else total_bits += bits;
                 }
                 int total_bytes = (total_bits + 7) / 8;
-                if (ptr + total_bytes > blk.size()) throw std::runtime_error("Not enough data for r");
-                BitReaderMSB r_reader(blk.data() + ptr, total_bytes);
-                for (int i = is_start; i < expected_band_count; ++i) {
-                    int bits = get_r_bits(i);
-                    int segmented_threshold = 6 * total_bands / 16;
-                    if (i < segmented_threshold) {
-                        is_use_segmented[i] = true;
-                        for (int s = 0; s < 4; ++s) {
-                            uint32_t q = r_reader.read_bits(bits);
-                            is_r[i][s] = dequantize_r(q, bits);
-                        }
-                    } else {
-                        is_use_segmented[i] = false;
-                        uint32_t q = r_reader.read_bits(bits);
-                        float r_val = dequantize_r(q, bits);
-                        is_r[i].fill(r_val);
-                    }
-                }
-                ptr += total_bytes;
                 int inv_bytes = (expected_band_count - is_start + 7) / 8;
-                if (ptr + inv_bytes > blk.size()) throw std::runtime_error("Not enough data for inv mask");
-                std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, expected_band_count - is_start);
-                for (int i = is_start; i < expected_band_count; ++i) {
-                    is_inv[i] = inv_tmp[i - is_start];
+                if (ptr + total_bytes + inv_bytes <= blk.size()) {
+                    is_used = true;
+                    BitReaderMSB r_reader(blk.data() + ptr, total_bytes);
+                    for (int i = is_start; i < expected_band_count; ++i) {
+                        int bits = get_r_bits(i);
+                        int segmented_threshold = 6 * total_bands / 16;
+                        if (i < segmented_threshold) {
+                            is_use_segmented[i] = true;
+                            for (int s = 0; s < 4; ++s) {
+                                uint32_t q = r_reader.read_bits(bits);
+                                is_r[i][s] = dequantize_r(q, bits);
+                            }
+                        } else {
+                            is_use_segmented[i] = false;
+                            uint32_t q = r_reader.read_bits(bits);
+                            float r_val = dequantize_r(q, bits);
+                            is_r[i].fill(r_val);
+                        }
+                    }
+                    ptr += total_bytes;
+                    std::vector<bool> inv_tmp = unpack_bits(blk.data() + ptr, inv_bytes, expected_band_count - is_start);
+                    for (int i = is_start; i < expected_band_count; ++i) {
+                        is_inv[i] = inv_tmp[i - is_start];
+                    }
+                    ptr += inv_bytes;
+                } else {
+                    is_used = false;
                 }
-                ptr += inv_bytes;
             }
         }
-        need(2);
-        uint16_t payload_len;
-        memcpy(&payload_len, &blk[ptr], 2);
-        ptr += 2;
-        BitReaderMSB payload_reader(blk.data() + ptr, payload_len);
+
         const float LOG_MIN = -6.0f;
         const float LOG_MAX =  0.0f;
         std::vector<float> steps0(expected_band_count, 0.0f);
@@ -306,7 +330,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             int is_start = get_is_start_band(target_kbps, total_bands);
             for (int i = 0; i < expected_band_count; ++i) {
                 if (mode_ms[i]) {
-                    if (block_format_version >= 17 && i >= is_start && is_start < expected_band_count) {
+                    if (block_format_version >= 17 && is_used && i >= is_start && is_start < expected_band_count) {
                         std::vector<float> left, right;
                         apply_is(ch0_bands[i], is_r[i], is_inv[i], is_use_segmented[i], left, right);
                         ch0_bands[i] = std::move(left);
@@ -320,11 +344,12 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 }
             }
         }
-        
+
+    
         std::vector<std::vector<float>> recon_chs(num_channels);
         for (int ch = 0; ch < num_channels; ++ch) {
             auto& bands = (ch == 0) ? ch0_bands : ch1_bands;
-            auto rec = wpt.iwpt(bands, sr, level);
+            auto rec = wpt.iwpt(bands, sr, level, target_kbps, num_channels);
             if (rec.size() < block_size) rec.resize(block_size, 0.0f);
             else rec.resize(block_size);
             recon_chs[ch] = std::move(rec);

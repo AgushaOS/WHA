@@ -19,18 +19,19 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
 }
 
 inline int get_is_start_band(float target_kbps, int total_bands) {
-    int base;
+    // return 16 * total_bands / 16;
+    int base = 16;
     if (target_kbps < 96.0f)      base = 2;
     else if (target_kbps < 128.0f) base = 3;
     else if (target_kbps < 160.0f) base = 4;
     else if (target_kbps < 190.0f) base = 8;
     else if (target_kbps < 224.0f) base = 14;
     else if (target_kbps < 510.0f) base = 16;
-    else return 999;
+    // else return 999;
     return base * total_bands / 16;
 }
 
-inline int get_r_bits(int /*band_idx*/) {
+inline int get_r_bits(int band_idx) {
     return 4;
 }
 
@@ -56,6 +57,12 @@ inline bool should_use_adaptive_panorama(const std::array<float, 4>& r_segments)
     }
     return (changes >= 2);
 }
+
+
+
+
+
+
 
 inline void compute_is_parameters_ex(const std::vector<float>& left,
                                      const std::vector<float>& right,
@@ -86,12 +93,14 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
         return;
     }
 
+    // use_segmented = true;
+
     double corr = dot_total / (std::sqrt(eL_total * eR_total) + eps);
     inv_flag = (corr < -0.2);
 
     int segmented_threshold = 6 * total_bands / 16;
     use_segmented = (band_idx < segmented_threshold);
-
+    
     if (use_segmented) {
         const int seg_size = n / 4;
         Y.resize(n);
@@ -140,7 +149,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
                     Y[start + i] = static_cast<float>(X_seg[i] * inv_sqrt_eX * target_energy);
                 }
             }
-        }
+        }        
     } else {
         use_segmented = false;
         float r = static_cast<float>(eR_total / total);
@@ -172,6 +181,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
         }
     }
 }
+
 
 inline void apply_is(const std::vector<float>& Y,
                      const std::array<float, 4>& r_vals,
@@ -212,13 +222,15 @@ inline void apply_is(const std::vector<float>& Y,
 inline uint32_t quantize_r(float r, int bits) {
     float r_clamped = std::clamp(r, 0.0f, 1.0f);
     float theta = std::asin(std::sqrt(r_clamped));
-    int max_val = (1 << bits) - 1;
+    
+    int max_val = (1 << bits) - 2;  
     float theta_norm = theta / (float)(M_PI * 0.5f);
+    
     return static_cast<uint32_t>(std::clamp(theta_norm, 0.0f, 1.0f) * max_val + 0.5f);
 }
 
 inline float dequantize_r(uint32_t q, int bits) {
-    int max_val = (1 << bits) - 1;
+    int max_val = (1 << bits) - 2; 
     float theta_norm = (float)q / max_val;
     float theta = theta_norm * (float)(M_PI * 0.5f);
     float s = std::sin(theta);
@@ -235,7 +247,7 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
     return {mid, side};
 }
 
-inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms, float /*target_kbps*/) {
+inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms, float target_kbps) {
     if (!enable_ms) return false;
     const float eps = 1e-12f;
     float min_e = std::min(El, Er);
