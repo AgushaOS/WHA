@@ -21,8 +21,8 @@ inline DualAllocResult allocate_bits_dual(
     int total_bits_budget,
     std::vector<int>& min_bits_in,
     std::vector<int>& max_bits_in,
-    std::vector<float>& energy0,
-    std::vector<float>& energy1,
+    std::vector<float> energy0,
+    std::vector<float> energy1,
     int reservoir,
     int reservoir_max,
     float target_kbps,
@@ -35,8 +35,10 @@ inline DualAllocResult allocate_bits_dual(
         for (auto& x : energy1) {
             x *= 0.70;
         }
-        // for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
-        //     energy0[i] *= 0.5;
+        // if (target_kbps / (stereo ? 2 : 1) < 48) {
+        //     for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
+        //         energy0[i] *= 0.5;
+        //     }
         // }
     }
 
@@ -65,8 +67,11 @@ inline DualAllocResult allocate_bits_dual(
                     bits1[0] = 4; 
                 }
             } else {
+                if (target_kbps >= 64) { 
+                    bits0[0] = 4;
+                    bits1[0] = 3;
+                }
                 bits0[0] = 4;
-                // bits1[0] = 3;
                 // bits1[0] = 3;
                 // if (energy0[0] > energy1[0]) {
                 //     bits0[0] = 4;

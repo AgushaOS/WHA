@@ -21,7 +21,8 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
 inline int get_is_start_band(float target_kbps, int total_bands) {
     // return 16 * total_bands / 16;
     int base = 16;
-    if (target_kbps < 96.0f)      base = 2;
+    if (target_kbps < 64.0f) base = 1;
+    else if (target_kbps < 96.0f)      base = 2;
     else if (target_kbps < 128.0f) base = 3;
     else if (target_kbps < 160.0f) base = 4;
     else if (target_kbps < 190.0f) base = 8;

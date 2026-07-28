@@ -339,7 +339,7 @@ public:
                     float* begin = data.data() + i * band_size;
                     float* end = begin + band_size;
                     for (float* p = begin; p != end; ++p)
-                        *p *= 0.5f;
+                        *p *= 0.25f;
                 }
             }
 
