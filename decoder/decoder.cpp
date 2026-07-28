@@ -295,7 +295,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             }
         }
 
-        // НОВОЕ: читаем SBR данные (в конце блока, после IS)
         int sbr_end = 3 * expected_band_count / 4;
         std::vector<bool> sbr_mask(expected_band_count, false);
         std::vector<float> sbr_rms(expected_band_count, 0.0f);
@@ -307,14 +306,12 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 sbr_mask = unpack_bits(blk.data() + ptr, sbr_mask_bytes, sbr_end);
                 ptr += sbr_mask_bytes;
 
-                // Проверяем, есть ли хоть одна SBR-полоса
                 bool any_sbr = false;
                 for (int i = 0; i < sbr_end; ++i) {
                     if (sbr_mask[i]) { any_sbr = true; break; }
                 }
 
                 if (any_sbr) {
-                    // Считаем размер SBR payload (только rms_idx)
                     int sbr_bits = 0;
                     for (int i = 0; i < sbr_end; ++i) {
                         if (sbr_mask[i]) {
@@ -406,7 +403,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             }
         }
 
-        // НОВОЕ: применяем SBR для пустых полос ch0
         if (sbr_used) {
             for (int i = 0; i < sbr_end; ++i) {
                 if (!sbr_mask[i]) continue;
@@ -415,7 +411,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 int N = band_shapes[i];
                 ch0_bands[i].resize(N);
 
-                // Ищем ближайшую активную полосу (с индексом < i)
                 int source_band = -1;
                 for (int j = i - 1; j >= 0; --j) {
                     if (active0[j]) {
@@ -428,36 +423,28 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                     const auto& src = ch0_bands[source_band];
                     int src_size = (int)src.size();
 
-                    // Вычисляем энергию источника
                     float src_energy = 0.0f;
                     for (float v : src) src_energy += v * v;
 
-                    // Целевая энергия
                     float target_rms = sbr_rms[i];
                     float target_energy = target_rms * target_rms * N;
 
-                    // Gain
                     float gain = std::sqrt(target_energy / (src_energy + 1e-12f));
 
-                    // Копируем с масштабированием
                     for (int j = 0; j < N; ++j) {
                         ch0_bands[i][j] = src[j % src_size] * gain;
                     }
                 } else {
-                    // Нет активной полосы — оставляем нули
                     std::fill(ch0_bands[i].begin(), ch0_bands[i].end(), 0.0f);
                 }
             }
         }
 
-        // НОВОЕ: IS применяется для ВСЕХ IS-полос, даже если они обнулены
         if (stereo && num_channels == 2) {
             int is_start = get_is_start_band(target_kbps, total_bands);
             for (int i = 0; i < expected_band_count; ++i) {
                 if (mode_ms[i]) {
                     if (block_format_version >= 18 && is_used && i >= is_start && is_start < expected_band_count) {
-                        // Для IS-полос всегда применяем IS, даже если полоса обнулена
-                        // Это сохраняет коэффициент панорамы
                         std::vector<float> left, right;
                         apply_is(ch0_bands[i], is_r[i], is_inv[i], is_use_segmented[i], left, right);
                         ch0_bands[i] = std::move(left);

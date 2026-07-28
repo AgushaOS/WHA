@@ -182,7 +182,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<std::vector<float>> ch0_bands(band_count);
     std::vector<std::vector<float>> ch1_bands(band_count);
 
-    // НОВОЕ: сохраняем оригинальные коэффициенты ch0 для SBR
     std::vector<std::vector<float>> ch0_original(band_count);
     for (int i = 0; i < band_count; ++i) {
         ch0_original[i] = left_coeffs[i];
@@ -215,9 +214,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 mode_ms[i] = 1;
                 ch0_bands[i] = std::move(mid);
                 ch1_bands[i] = std::move(side);
-                // if (target_kbps < 64) {
-                //     ch1_bands[i] = std::vector<float>(side.size(), 0);
-                // }
             } else {
                 mode_ms[i] = 0;
                 ch0_bands[i] = std::move(left_band);
@@ -351,11 +347,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         if (stereo) active1[i] = (bits1[i] > 0);
     }
 
-    // НОВОЕ: SBR данные
     std::vector<bool> sbr_mask(band_count, false);
     std::vector<uint32_t> sbr_rms_idx(band_count, 0);
 
-    // SBR только для блоков полной длины, в диапазоне [0, 3*band_count/4)
     int sbr_end = block_is_full ? (3 * band_count / 4) : 0;
 
     const float LOG_MIN = -6.0f;
@@ -370,12 +364,10 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         return (uint32_t)idx;
     };
 
-    // Заполняем SBR данные для пустых полос ch0
     for (int i = 0; i < sbr_end; ++i) {
         if (!active0[i]) {
             sbr_mask[i] = true;
 
-            // Вычисляем RMS оригинальной полосы
             const auto& orig = ch0_original[i];
             double sum_sq = 0.0;
             for (float v : orig) {
@@ -383,7 +375,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             }
             float rms = std::sqrt(static_cast<float>(sum_sq / orig.size()) + eps);
 
-            // Квантуем RMS
             int sb = get_scale_bits(i);
             sbr_rms_idx[i] = get_scale_idx(rms, sb);
         }
@@ -510,7 +501,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         out.insert(out.end(), inv_mask.begin(), inv_mask.end());
     }
 
-    // НОВОЕ: записываем SBR данные
     if (sbr_end > 0) {
         std::vector<uint8_t> sbr_mask_packed = pack_bits(sbr_mask, 0, sbr_end);
         out.insert(out.end(), sbr_mask_packed.begin(), sbr_mask_packed.end());
