@@ -30,10 +30,7 @@ static void init_half_table() {
         int32_t exp = (h >> 10) & 0x1F;
         uint32_t mant = h & 0x3FF;
         if (exp == 0) {
-            if (mant == 0) {
-                half_to_float_table[i] = 0.0f;
-                continue;
-            }
+            if (mant == 0) { half_to_float_table[i] = 0.0f; continue; }
             exp = 1;
         } else if (exp == 31) {
             exp = 255;
@@ -46,10 +43,6 @@ static void init_half_table() {
         half_to_float_table[i] = f;
     }
     half_table_initialized = true;
-}
-
-static float half_to_float_fast(uint16_t h) {
-    return half_to_float_table[h];
 }
 
 static int get_scale_bits(int band_idx) {
@@ -110,7 +103,10 @@ static std::vector<bool> unpack_bits(const uint8_t* data, int bytes, int total_b
     return bits;
 }
 
-void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav) {
+void decompress_wha_to_wav(const std::string& in_wha,
+                           const std::string& out_wav,
+                           size_t write_batch_frames = 8192) 
+{
     init_half_table();
 
     std::ifstream f(in_wha, std::ios::binary);
@@ -140,13 +136,52 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
     std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
     std::vector<bool> block_modes = unpack_bits(mode_packed.data(), mode_bytes, block_count);
 
-    int max_total_samples = block_count * 2048;
-    std::vector<float> accum(max_total_samples * num_channels, 0.0f);
-    std::vector<float> weight(max_total_samples * num_channels, 0.0f);
+    drwav_data_format fmt;
+    fmt.container = drwav_container_riff;
+    fmt.format = DR_WAVE_FORMAT_IEEE_FLOAT;
+    fmt.channels = num_channels;
+    fmt.sampleRate = sr;
+    fmt.bitsPerSample = 32;
+
+    drwav wav;
+    if (!drwav_init_file_write(&wav, out_wav.c_str(), &fmt, nullptr))
+        throw std::runtime_error("dr_wav failed to init");
 
     PWPT wpt;
-    int current_pos = 0;
+    int output_pos = 0;          
+    int current_pos = 0;        
     int prev_block_size = 1024;
+
+    std::vector<float> accum;
+    std::vector<float> weight;
+    accum.reserve(write_batch_frames * 4 * num_channels);  
+    weight.reserve(write_batch_frames * 4 * num_channels);
+    size_t head_offset = 0;
+
+    std::vector<float> write_buf;
+    write_buf.reserve(write_batch_frames * num_channels);
+
+    auto compact_buffer = [&]() {
+        size_t compact_threshold = (write_batch_frames > 2048) ? write_batch_frames / 2 : 2048;
+        if (head_offset > compact_threshold && head_offset * 2 > accum.size() / num_channels) {
+            size_t remove_samples = head_offset;
+            if (remove_samples > 0) {
+                size_t remove_elements = remove_samples * num_channels;
+                accum.erase(accum.begin(), accum.begin() + remove_elements);
+                weight.erase(weight.begin(), weight.begin() + remove_elements);
+                head_offset = 0;
+            }
+        }
+    };
+
+    auto flush_write_buffer = [&]() {
+        if (write_buf.empty()) return;
+        size_t frames = write_buf.size() / num_channels;
+        if (frames > 0) {
+            drwav_write_pcm_frames(&wav, frames, write_buf.data());
+        }
+        write_buf.clear();
+    };
 
     for (uint32_t bi = 0; bi < block_count; ++bi) {
         bool use_long_block = block_modes[bi];
@@ -157,7 +192,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
         int hop = block_size - right_overlap;
 
         int total_bands = 1 << level;
-
         std::vector<int> band_shapes = compute_band_shapes(block_size, level);
         if ((int)band_shapes.size() != total_bands) {
             band_shapes.clear();
@@ -297,6 +331,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
         int sbr_end = 3 * expected_band_count / 4;
         std::vector<bool> sbr_mask(expected_band_count, false);
+        std::vector<bool> sbr_noise_flag(expected_band_count, false);
         std::vector<float> sbr_rms(expected_band_count, 0.0f);
         bool sbr_used = false;
 
@@ -306,6 +341,11 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 sbr_mask = unpack_bits(blk.data() + ptr, sbr_mask_bytes, sbr_end);
                 ptr += sbr_mask_bytes;
 
+                if (ptr + sbr_mask_bytes <= blk.size()) {
+                    sbr_noise_flag = unpack_bits(blk.data() + ptr, sbr_mask_bytes, sbr_end);
+                    ptr += sbr_mask_bytes;
+                }
+
                 bool any_sbr = false;
                 for (int i = 0; i < sbr_end; ++i) {
                     if (sbr_mask[i]) { any_sbr = true; break; }
@@ -314,9 +354,7 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 if (any_sbr) {
                     int sbr_bits = 0;
                     for (int i = 0; i < sbr_end; ++i) {
-                        if (sbr_mask[i]) {
-                            sbr_bits += get_scale_bits(i);
-                        }
+                        if (sbr_mask[i]) sbr_bits += get_scale_bits(i);
                     }
                     int sbr_bytes = (sbr_bits + 7) / 8;
 
@@ -329,7 +367,6 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
                         for (int i = 0; i < sbr_end; ++i) {
                             if (!sbr_mask[i]) continue;
-
                             int sb = get_scale_bits(i);
                             uint32_t rms_idx = sbr_reader.read_bits(sb);
                             int max_idx = (1 << sb) - 1;
@@ -411,31 +448,42 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
                 int N = band_shapes[i];
                 ch0_bands[i].resize(N);
 
-                int source_band = -1;
-                for (int j = i - 1; j >= 0; --j) {
-                    if (active0[j]) {
-                        source_band = j;
-                        break;
-                    }
-                }
+                float target_rms = sbr_rms[i];
+                float target_energy = target_rms * target_rms * N;
 
-                if (source_band >= 0) {
-                    const auto& src = ch0_bands[source_band];
-                    int src_size = (int)src.size();
-
-                    float src_energy = 0.0f;
-                    for (float v : src) src_energy += v * v;
-
-                    float target_rms = sbr_rms[i];
-                    float target_energy = target_rms * target_rms * N;
-
-                    float gain = std::sqrt(target_energy / (src_energy + 1e-12f));
-
+                if (sbr_noise_flag[i]) {
+                    uint32_t seed = bi * 1000000u + (uint32_t)i * 137u + 1u;
+                    float noise_energy = 0.0f;
                     for (int j = 0; j < N; ++j) {
-                        ch0_bands[i][j] = src[j % src_size] * gain;
+                        seed = seed * 1664525u + 1013904223u;
+                        float noise = (static_cast<float>(seed) / 2147483648.0f) - 1.0f;
+                        ch0_bands[i][j] = noise;
+                        noise_energy += noise * noise;
+                    }
+                    float gain = std::sqrt(target_energy / (noise_energy + 1e-12f));
+                    for (int j = 0; j < N; ++j) {
+                        ch0_bands[i][j] *= gain;
                     }
                 } else {
-                    std::fill(ch0_bands[i].begin(), ch0_bands[i].end(), 0.0f);
+                    int source_band = -1;
+                    for (int j = i - 1; j >= 0; --j) {
+                        if (active0[j]) {
+                            source_band = j;
+                            break;
+                        }
+                    }
+                    if (source_band >= 0) {
+                        const auto& src = ch0_bands[source_band];
+                        int src_size = (int)src.size();
+                        float src_energy = 0.0f;
+                        for (float v : src) src_energy += v * v;
+                        float gain = std::sqrt(target_energy / (src_energy + 1e-12f));
+                        for (int j = 0; j < N; ++j) {
+                            ch0_bands[i][j] = src[j % src_size] * gain;
+                        }
+                    } else {
+                        std::fill(ch0_bands[i].begin(), ch0_bands[i].end(), 0.0f);
+                    }
                 }
             }
         }
@@ -468,47 +516,68 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
             recon_chs[ch] = std::move(rec);
         }
 
+        size_t needed_samples = block_size;
+        if (accum.size() / num_channels < head_offset + block_size) {
+            accum.resize((head_offset + block_size) * num_channels, 0.0f);
+            weight.resize((head_offset + block_size) * num_channels, 0.0f);
+        }
+
+        int local_start = (current_pos - output_pos) + head_offset;
         for (int ch = 0; ch < num_channels; ++ch) {
-            int src_ch = (ch < (int)recon_chs.size()) ? ch : 0;
-            const float* src = recon_chs[src_ch].data();
-            int global_offset = current_pos * num_channels + ch;
+            const float* src = recon_chs[ch].data();
             for (int i = 0; i < block_size; ++i) {
-                int idx = global_offset + i * num_channels;
-                if (idx < (int)accum.size()) {
-                    float w = window[i];
-                    accum[idx] += src[i] * w;
-                    weight[idx] += window_sq[i];
-                }
+                int local_idx = (local_start + i) * num_channels + ch;
+                float w = window[i];
+                accum[local_idx] += src[i] * w;
+                weight[local_idx] += window_sq[i];
             }
         }
 
         current_pos += hop;
+
+        int ready = current_pos - output_pos; 
+        if (ready > 0) {
+            size_t offset = write_buf.size();
+            write_buf.resize(offset + ready * num_channels);
+            float* out_ptr = write_buf.data() + offset;
+            for (int i = 0; i < ready; ++i) {
+                int local_idx = (head_offset + i) * num_channels;
+                for (int ch = 0; ch < num_channels; ++ch) {
+                    float val = (weight[local_idx + ch] > 1e-9f) ? (accum[local_idx + ch] / weight[local_idx + ch]) : 0.0f;
+                    out_ptr[i * num_channels + ch] = val;
+                }
+            }
+            head_offset += ready;
+            output_pos = current_pos;
+
+            if (write_buf.size() >= write_batch_frames * num_channels) {
+                flush_write_buffer();
+            }
+            compact_buffer();
+        }
+
         prev_block_size = block_size;
     }
 
-    size_t total_frames = current_pos;
-    std::vector<float> out_interleaved(total_frames * num_channels);
-    for (size_t i = 0; i < total_frames * num_channels; ++i) {
-        if (weight[i] > 1e-9f) out_interleaved[i] = accum[i] / weight[i];
-        else out_interleaved[i] = 0.0f;
+    size_t remaining_samples = accum.size() / num_channels - head_offset;
+    if (remaining_samples > 0) {
+        size_t offset = write_buf.size();
+        write_buf.resize(offset + remaining_samples * num_channels);
+        float* out_ptr = write_buf.data() + offset;
+        for (size_t i = 0; i < remaining_samples; ++i) {
+            size_t local_idx = (head_offset + i) * num_channels;
+            for (int ch = 0; ch < num_channels; ++ch) {
+                float val = (weight[local_idx + ch] > 1e-9f) ? (accum[local_idx + ch] / weight[local_idx + ch]) : 0.0f;
+                out_ptr[i * num_channels + ch] = val;
+            }
+        }
     }
 
-    drwav_data_format fmt;
-    fmt.container = drwav_container_riff;
-    fmt.format = DR_WAVE_FORMAT_IEEE_FLOAT;
-    fmt.channels = num_channels;
-    fmt.sampleRate = sr;
-    fmt.bitsPerSample = 32;
+    flush_write_buffer();
 
-    drwav wav;
-    if (!drwav_init_file_write(&wav, out_wav.c_str(), &fmt, nullptr))
-        throw std::runtime_error("dr_wav failed to init");
-
-    drwav_uint64 written = drwav_write_pcm_frames(&wav, total_frames, out_interleaved.data());
     drwav_uninit(&wav);
-    if (written != total_frames) throw std::runtime_error("dr_wav wrote fewer frames");
 
-    std::cout << "Decompressed: " << out_wav << " (frames=" << written
+    std::cout << "Decompressed: " << out_wav << " (frames=" << output_pos
               << ", sr=" << sr << ", ch=" << (int)num_channels << ")\n";
 }
 
@@ -516,15 +585,28 @@ void decompress_wha_to_wav(const std::string& in_wha, const std::string& out_wav
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: decoder <input.wha> <output.wav>\n";
+        std::cerr << "Usage: decoder <input.wha> <output.wav> [buffer_size_in_samples]\n";
         return 1;
+    }
+
+    size_t buffer_size = 8192;  
+    if (argc >= 4) {
+        try {
+            buffer_size = std::stoul(argv[3]);
+            if (buffer_size == 0) {
+                std::cerr << "Buffer size must be > 0, using default 8192\n";
+                buffer_size = 8192;
+            }
+        } catch (...) {
+            std::cerr << "Invalid buffer size, using default 8192\n";
+        }
     }
 
     try {
         struct rusage usage_before, usage_after;
         getrusage(RUSAGE_SELF, &usage_before);
 
-        decompress_wha_to_wav(argv[1], argv[2]);
+        decompress_wha_to_wav(argv[1], argv[2], buffer_size);
 
         getrusage(RUSAGE_SELF, &usage_after);
         double user_time_sec = (usage_after.ru_utime.tv_sec - usage_before.ru_utime.tv_sec) +
