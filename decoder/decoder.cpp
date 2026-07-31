@@ -130,7 +130,7 @@ void decompress_wha_to_wav(const std::string& in_wha,
         throw std::runtime_error("Unsupported block format version (only v18)");
 
     float per_channel_kbps = target_kbps / num_channels;
-    float overlap_factor = (per_channel_kbps <= 48.0f) ? 0.5f : 1.0f;
+    float overlap_factor = (per_channel_kbps <= 0.0f) ? 0.5f : 1.0f;
 
     int mode_bytes = (block_count + 7) / 8;
     std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
@@ -268,6 +268,8 @@ void decompress_wha_to_wav(const std::string& in_wha,
         uint8_t k_scale_byte = blk[ptr++];
         int k_scale0 = k_scale_byte & 0x07;
         int k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
+        bool block_is_full = (k_scale_byte & 0x80) != 0;   
+        int sbr_end = block_is_full ? (3 * expected_band_count / 4) : 0;
 
         need(2);
         uint16_t payload_len;
@@ -329,51 +331,45 @@ void decompress_wha_to_wav(const std::string& in_wha,
             }
         }
 
-        int sbr_end = 3 * expected_band_count / 4;
-        std::vector<bool> sbr_mask(expected_band_count, false);
         std::vector<bool> sbr_noise_flag(expected_band_count, false);
         std::vector<float> sbr_rms(expected_band_count, 0.0f);
         bool sbr_used = false;
 
         if (block_format_version >= 18 && sbr_end > 0) {
-            int sbr_mask_bytes = (sbr_end + 7) / 8;
-            if (ptr + sbr_mask_bytes <= blk.size()) {
-                sbr_mask = unpack_bits(blk.data() + ptr, sbr_mask_bytes, sbr_end);
-                ptr += sbr_mask_bytes;
-
-                if (ptr + sbr_mask_bytes <= blk.size()) {
-                    sbr_noise_flag = unpack_bits(blk.data() + ptr, sbr_mask_bytes, sbr_end);
-                    ptr += sbr_mask_bytes;
+            std::vector<int> sbr_indices;
+            for (int i = 0; i < sbr_end; ++i) {
+                if (!active0[i]) {
+                    sbr_indices.push_back(i);
                 }
-
-                bool any_sbr = false;
-                for (int i = 0; i < sbr_end; ++i) {
-                    if (sbr_mask[i]) { any_sbr = true; break; }
-                }
-
-                if (any_sbr) {
-                    int sbr_bits = 0;
-                    for (int i = 0; i < sbr_end; ++i) {
-                        if (sbr_mask[i]) sbr_bits += get_scale_bits(i);
+            }
+            if (!sbr_indices.empty()) {
+                int noise_bytes = (sbr_indices.size() + 7) / 8;
+                if (ptr + noise_bytes <= blk.size()) {
+                    std::vector<uint8_t> noise_packed(blk.begin() + ptr, blk.begin() + ptr + noise_bytes);
+                    ptr += noise_bytes;
+                    for (size_t j = 0; j < sbr_indices.size(); ++j) {
+                        int idx = sbr_indices[j];
+                        sbr_noise_flag[idx] = (noise_packed[j / 8] >> (j % 8)) & 1;
                     }
-                    int sbr_bytes = (sbr_bits + 7) / 8;
 
-                    if (ptr + sbr_bytes <= blk.size()) {
+                    int total_rms_bits = 0;
+                    for (int idx : sbr_indices) {
+                        total_rms_bits += get_scale_bits(idx);
+                    }
+                    int rms_bytes = (total_rms_bits + 7) / 8;
+                    if (ptr + rms_bytes <= blk.size()) {
                         sbr_used = true;
-                        BitReaderMSB sbr_reader(blk.data() + ptr, sbr_bytes);
-
+                        BitReaderMSB rms_reader(blk.data() + ptr, rms_bytes);
                         const float LOG_MIN = -6.0f;
                         const float LOG_MAX =  0.0f;
-
-                        for (int i = 0; i < sbr_end; ++i) {
-                            if (!sbr_mask[i]) continue;
-                            int sb = get_scale_bits(i);
-                            uint32_t rms_idx = sbr_reader.read_bits(sb);
+                        for (int idx : sbr_indices) {
+                            int sb = get_scale_bits(idx);
+                            uint32_t rms_idx = rms_reader.read_bits(sb);
                             int max_idx = (1 << sb) - 1;
                             float log_rms = LOG_MIN + rms_idx * (LOG_MAX - LOG_MIN) / max_idx;
-                            sbr_rms[i] = exp10f(log_rms);
+                            sbr_rms[idx] = exp10f(log_rms);
                         }
-                        ptr += sbr_bytes;
+                        ptr += rms_bytes;
                     }
                 }
             }
@@ -440,14 +436,21 @@ void decompress_wha_to_wav(const std::string& in_wha,
             }
         }
 
-        if (sbr_used) {
-            for (int i = 0; i < sbr_end; ++i) {
-                if (!sbr_mask[i]) continue;
-                if (active0[i]) continue;
+        
 
+        if (sbr_used) {
+            std::vector<int> available_sources;
+            for (int j = 0; j < expected_band_count; ++j) {
+                if (active0[j]) {
+                    available_sources.push_back(j);
+                }
+            }
+            std::vector<bool> source_used(expected_band_count, false);
+
+            for (int i = 0; i < sbr_end; ++i) {
+                if (active0[i]) continue;   
                 int N = band_shapes[i];
                 ch0_bands[i].resize(N);
-
                 float target_rms = sbr_rms[i];
                 float target_energy = target_rms * target_rms * N;
 
@@ -466,13 +469,23 @@ void decompress_wha_to_wav(const std::string& in_wha,
                     }
                 } else {
                     int source_band = -1;
-                    for (int j = i - 1; j >= 0; --j) {
-                        if (active0[j]) {
-                            source_band = j;
-                            break;
+                    float best_weight = -1.0f;
+                    const int IDEAL_DISTANCE = 2;
+                    const float SIGMA = 3.0f;
+
+                    for (int src : available_sources) {
+                        if (source_used[src]) continue;
+                        int distance = std::abs(src - i);
+                        float d = (float)(distance - IDEAL_DISTANCE);
+                        float weight = std::exp(-(d * d) / (2.0f * SIGMA * SIGMA));
+                        if (weight > best_weight) {
+                            best_weight = weight;
+                            source_band = src;
                         }
                     }
+
                     if (source_band >= 0) {
+                        source_used[source_band] = true;
                         const auto& src = ch0_bands[source_band];
                         int src_size = (int)src.size();
                         float src_energy = 0.0f;

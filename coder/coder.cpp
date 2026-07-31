@@ -63,7 +63,7 @@ static int compute_optimal_rice_k(const std::vector<uint32_t>& vals, int max_k =
     return best_k;
 }
 
-static bool detect_transient_block(const std::vector<float>& block, int num_channels) {
+static bool detect_transient_block_stereo(const std::vector<float>& block, int num_channels) {
     int N = block.size() / num_channels;
     const float* data = block.data();
     if (N < 64) return false;
@@ -82,7 +82,42 @@ static bool detect_transient_block(const std::vector<float>& block, int num_chan
     float smoothness_ratio = diff_energy / total_energy;
     float rms = std::sqrt(total_energy / N);
     float peak_to_rms = max_abs / (rms + 1e-12f);
-    return !((smoothness_ratio < 0.5f) && (peak_to_rms < 3.0f));
+    
+    static float smoothed_peak = 0.0f;
+    static bool initialized = false;
+    
+    if (!initialized) {
+        smoothed_peak = peak_to_rms;
+        initialized = true;
+    } else {
+        float alpha = (peak_to_rms > smoothed_peak) ? 0.75f : 0.4f;
+        smoothed_peak = alpha * peak_to_rms + (1.0f - alpha) * smoothed_peak;
+    }
+        
+    return !((smoothness_ratio < 0.5f) && (smoothed_peak < 2.96f));
+}
+
+static bool detect_transient_block_mono(const std::vector<float>& block, int num_channels) {
+    int N = block.size() / num_channels;
+    const float* data = block.data();
+    if (N < 64) return false;
+    float diff_energy = 0.0f, total_energy = 0.0f, max_abs = 0.0f;
+    for (int i = 0; i < N; ++i) {
+        float sample = data[i * num_channels];
+        float av = std::abs(sample);
+        if (av > max_abs) max_abs = av;
+        total_energy += sample * sample;
+        if (i > 0) {
+            float diff = sample - data[(i - 1) * num_channels];
+            diff_energy += diff * diff;
+        }
+    }
+    if (total_energy < 1e-6f) return false;
+    float smoothness_ratio = diff_energy / total_energy;
+    float rms = std::sqrt(total_energy / N);
+    float peak_to_rms = max_abs / (rms + 1e-12f);
+    // std::cout << peak_to_rms << '\n';
+    return !((smoothness_ratio < 0.5f) && (peak_to_rms < 3.00f));
 }
 
 static std::vector<uint8_t> pack_bits(const std::vector<bool>& bits, int start, int end) {
@@ -183,7 +218,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             float Em = 0, Es = 0;
             for (int j = 0; j < n; ++j) { Em += mid[j]*mid[j]; Es += side[j]*side[j]; }
             bool use_ms = use_mid_side(El, Er, Em, Es, enable_ms, target_kbps);
-            if (use_ms || target_kbps <= 96) {
+            if (use_ms || target_kbps <= 0) {
                 mode_ms[i] = 1;
                 ch0_bands[i] = std::move(mid);
                 ch1_bands[i] = std::move(side);
@@ -308,15 +343,12 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         if (stereo) active1[i] = (bits1[i] > 0);
     }
 
-    std::vector<bool> sbr_mask(band_count, false);
-    std::vector<bool> sbr_noise_flag(band_count, false);
+    std::vector<bool> sbr_noise_flag(band_count, false);   
     std::vector<uint32_t> sbr_rms_idx(band_count, 0);
-
     int sbr_end = block_is_full ? (3 * band_count / 4) : 0;
 
     const float LOG_MIN = -6.0f;
     const float LOG_MAX =  0.0f;
-
     auto get_scale_idx = [&](float step, int sb) -> uint32_t {
         if (step <= 0) return 0;
         float log_s = log10f(std::max(step, 1e-12f));
@@ -328,7 +360,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     for (int i = 0; i < sbr_end; ++i) {
         if (!active0[i]) {
-            sbr_mask[i] = true;
             const auto& orig = ch0_original[i];
             double sum_sq = 0.0;
             float max_abs = 0.0f;
@@ -344,7 +375,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             sbr_rms_idx[i] = get_scale_idx(rms, sb);
         }
     }
-
     std::vector<uint8_t> header;
     int mask_bytes = (band_count + 7) / 8;
 
@@ -383,12 +413,14 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             float step = scale_and_bits_to_step(qres0.scales[i], bits0[i]);
             uint32_t idx = get_scale_idx(step, sb);
             scale_indices0.push_back(idx);
+            // std::cout << idx << ' ';
         }
         if (stereo && active1[i]) {
             int sb = get_scale_bits(i);
             float step = scale_and_bits_to_step(qres1.scales[i], bits1[i]);
             uint32_t idx = get_scale_idx(step, sb);
             scale_indices1.push_back(idx);
+            // std::cout << idx << ' ';
         }
     }
 
@@ -397,6 +429,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     uint8_t k_scale_byte = (uint8_t)(k_scale0 & 0x07);
     if (stereo) k_scale_byte |= ((k_scale1 & 0x07) << 3);
+    if (block_is_full) k_scale_byte |= 0x80;   
     header.push_back(k_scale_byte);
 
     BitWriterMSB payload_writer;
@@ -465,20 +498,30 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
 
     if (sbr_end > 0) {
-        std::vector<uint8_t> sbr_mask_packed = pack_bits(sbr_mask, 0, sbr_end);
-        out.insert(out.end(), sbr_mask_packed.begin(), sbr_mask_packed.end());
-        std::vector<uint8_t> sbr_noise_packed = pack_bits(sbr_noise_flag, 0, sbr_end);
-        out.insert(out.end(), sbr_noise_packed.begin(), sbr_noise_packed.end());
-
-        BitWriterMSB sbr_writer;
+        std::vector<int> sbr_indices;
         for (int i = 0; i < sbr_end; ++i) {
-            if (!sbr_mask[i]) continue;
-            int sb = get_scale_bits(i);
-            sbr_writer.write_bits(sbr_rms_idx[i], sb);
+            if (!active0[i]) {
+                sbr_indices.push_back(i);
+            }
         }
-        sbr_writer.flush();
-        std::vector<uint8_t> sbr_bytes = sbr_writer.data();
-        out.insert(out.end(), sbr_bytes.begin(), sbr_bytes.end());
+        if (!sbr_indices.empty()) {
+            std::vector<bool> noise_bits;
+            noise_bits.reserve(sbr_indices.size());
+            for (int idx : sbr_indices) {
+                noise_bits.push_back(sbr_noise_flag[idx]);
+            }
+            std::vector<uint8_t> noise_packed = pack_bits(noise_bits, 0, (int)noise_bits.size());
+            out.insert(out.end(), noise_packed.begin(), noise_packed.end());
+
+            BitWriterMSB rms_writer;
+            for (int idx : sbr_indices) {
+                int sb = get_scale_bits(idx);
+                rms_writer.write_bits(sbr_rms_idx[idx], sb);
+            }
+            rms_writer.flush();
+            std::vector<uint8_t> rms_bytes = rms_writer.data();
+            out.insert(out.end(), rms_bytes.begin(), rms_bytes.end());
+        }
     }
 
     return out;
@@ -560,7 +603,7 @@ compress_audio_streaming(const std::string& input_path,
 
     float target_kbps = (target_kbps_in > 0) ? target_kbps_in : SETTINGS.default_target_kbps;
     float per_channel_kbps = target_kbps / num_channels;
-    float overlap_factor = (per_channel_kbps <= 48.0f) ? 0.5f : 1.0f;
+    float overlap_factor = (per_channel_kbps <= 0.0f) ? 0.5f : 1.0f;
 
     PWPT wpt;
     std::vector<std::vector<uint8_t>> blocks_raw;
@@ -605,7 +648,12 @@ compress_audio_streaming(const std::string& input_path,
             std::fill(analyze_buf.begin() + avail / num_channels, analyze_buf.end(), 0.0f);
         }
 
-        bool is_transient = detect_transient_block(analyze_buf, num_channels);
+        bool is_transient = false;
+        if (num_channels == 2) {
+            is_transient = detect_transient_block_stereo(analyze_buf, num_channels);
+        } else {
+            is_transient = detect_transient_block_mono(analyze_buf, num_channels);
+        }
 
         int block_size, right_overlap, level;
         if (is_transient) {

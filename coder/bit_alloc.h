@@ -33,11 +33,11 @@ inline DualAllocResult allocate_bits_dual(
 
     if (target_kbps / (stereo ? 2 : 1) < 64) { 
         for (auto& x : energy1) {
-            x *= 0.70;
+            x *= 0.7;
         }
         // if (target_kbps / (stereo ? 2 : 1) < 48) {
         //     for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
-        //         energy0[i] *= 0.5;
+        //         energy0[i] *= 0.0;
         //     }
         // }
     }
@@ -67,11 +67,11 @@ inline DualAllocResult allocate_bits_dual(
                     bits1[0] = 4; 
                 }
             } else {
-                if (target_kbps >= 64) { 
+                if (target_kbps >= 0) { 
                     bits0[0] = 4;
                     bits1[0] = 3;
                 }
-                bits0[0] = 4;
+                // bits0[0] = 4;
                 // bits1[0] = 3;
                 // if (energy0[0] > energy1[0]) {
                 //     bits0[0] = 4;

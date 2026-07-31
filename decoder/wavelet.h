@@ -259,11 +259,6 @@ protected:
         }
 
 
-
-        // -------------------------
-        // Interleave
-        // -------------------------
-
         if (tmp.size() < N)
             tmp.resize(N);
 
@@ -330,6 +325,8 @@ public:
     }
 };
 
+uint64_t bi = 0;
+
 class PWPT : public DD64out {
 private:
     static inline float fast_pow_1333(float x) {
@@ -344,14 +341,23 @@ private:
         return perm;
     }
 
-    void add_dither(std::vector<std::vector<float>>& subbands, float strength = 1e-5f) const
-    {
-        thread_local std::mt19937 rng(std::random_device{}());
-        thread_local std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-        for (auto& band : subbands) {
-            for (float& x : band)
-                x += strength * dist(rng);
+    void apply_temporal_dither(std::vector<float>& pcm, float kbps_per_channel) const {
+        if (kbps_per_channel > 96.0f) return;
+        
+        const float AMPLITUDE = 3e-5f;  
+        
+        uint32_t seed = (uint32_t)bi * 1000000u + 1u;
+        
+        for (size_t i = 0; i < pcm.size(); ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            float rand1 = static_cast<float>(seed) / 4294967296.0f;  
+            
+            seed = seed * 1664525u + 1013904223u;
+            float rand2 = static_cast<float>(seed) / 4294967296.0f;  
+            
+            float dither = (rand1 + rand2 - 1.0f) * AMPLITUDE;
+            
+            pcm[i] += dither;
         }
     }
 
@@ -360,8 +366,10 @@ public:
                             float sr,
                             int levels,
                             float target_kbps,
-                            float channels) {
+                            float channels) {  
         const int total_bands = 1 << levels;
+
+        bi++;
 
         if (sr >= 44100) {
             int atten_start = total_bands * 3 / 4;
@@ -381,9 +389,6 @@ public:
             }
         }
 
-        if (target_kbps / float(channels) <= 96) {
-            add_dither(subbands);
-        }
 
         if (levels > 1) {
             auto perm = gray_permutation(levels);
@@ -393,9 +398,13 @@ public:
             subbands = std::move(reordered);
         }
 
-        return wpt_reconstruct(subbands, levels);
+        std::vector<float> pcm = wpt_reconstruct(subbands, levels);
+        
+        float kbps_per_channel = target_kbps / float(channels);
+        apply_temporal_dither(pcm, kbps_per_channel);
+        
+        return pcm;
     }
 };
-
 
 #endif // WAVELET_H

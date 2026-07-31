@@ -21,7 +21,7 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
 inline int get_is_start_band(float target_kbps, int total_bands) {
     // return 16 * total_bands / 16;
     int base = 16;
-    if (target_kbps < 64.0f) base = 1;
+    if (target_kbps < 64.0f) base = 2;
     else if (target_kbps < 96.0f)      base = 2;
     else if (target_kbps < 128.0f) base = 3;
     else if (target_kbps < 160.0f) base = 4;
@@ -248,16 +248,53 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
     return {mid, side};
 }
 
-inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms, float target_kbps) {
-    if (!enable_ms) return false;
+// inline bool use_mid_side(float El, float Er, float Em, float Es, bool enable_ms, float target_kbps) {
+//     if (!enable_ms) return false;
+//     const float eps = 1e-12f;
+//     float min_e = std::min(El, Er);
+//     float max_e = std::max(El, Er);
+//     float energy_ratio = max_e / (min_e + eps);
+//     if (energy_ratio > 4.0f) return false;
+//     if (Es > Em * 0.5f) return false;
+//     float prod_lr = El * Er;
+//     float prod_ms = Em * Es;
+//     return prod_ms < prod_lr * 0.95f;
+// }
+
+inline bool use_mid_side(float El, float Er, float Em, float Es,
+                         bool enable_ms, float target_kbps)
+{
+    if (!enable_ms)
+        return false;
+
     const float eps = 1e-12f;
+
+    if (target_kbps < 128.0f) {
+        if (Es > Em * 0.9f)
+            return false;
+
+        float prod_lr = El * Er;
+        float prod_ms = Em * Es;
+
+        if (prod_ms > prod_lr * 1.05f)
+            return false;
+
+        return true;
+    }
+
     float min_e = std::min(El, Er);
     float max_e = std::max(El, Er);
     float energy_ratio = max_e / (min_e + eps);
-    if (energy_ratio > 4.0f) return false;
-    if (Es > Em * 0.5f) return false;
+
+    if (energy_ratio > 4.0f)
+        return false;
+
+    if (Es > Em * 0.5f)
+        return false;
+
     float prod_lr = El * Er;
     float prod_ms = Em * Es;
+
     return prod_ms < prod_lr * 0.95f;
 }
 
