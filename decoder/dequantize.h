@@ -6,7 +6,7 @@
 #include <algorithm>
 
 inline void dequantize_band(
-    const std::vector<int32_t>& quantized,
+    std::vector<int32_t>& quantized,
     float step,
     std::vector<float>& out_band)
 {

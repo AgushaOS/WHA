@@ -140,9 +140,12 @@ inline QuantResult quantize_levels(
     }
 
     // for (auto y : quantized_per_level) {
+    //     int64_t k = 0;
     //     for (auto x : y) {
-    //         std::cout << x << ' ';
+    //         k += std::abs(x);
+    //         // std::cout << x << ' ';
     //     }
+    //     std::cout << k << ' ';
     //     std::cout << "| "; 
     // }
     // std::cout << '\n';

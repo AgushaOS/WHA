@@ -36,11 +36,15 @@ inline DualAllocResult allocate_bits_dual(
             x *= 0.7;
         }
         // if (target_kbps / (stereo ? 2 : 1) < 48) {
-        //     for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
-        //         energy0[i] *= 0.0;
-        //     }
         // }
+
+        // for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
+        //     energy0[i] *= 0.25;
+        // }
+
     }
+
+
 
 
     static thread_local std::vector<int> bits0, bits1, max_b, active;
