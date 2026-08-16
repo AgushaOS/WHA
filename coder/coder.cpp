@@ -21,9 +21,6 @@
 #include "joint_stereo.h"
 #include "quantize.h"
 #include "entropy_encoder.h"
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 #include "settings.h"
 #include "pred_state.h"
@@ -71,23 +68,6 @@ static int get_adaptive_is_max_base(float target_kbps, const EncoderSettings& s)
     int b = (int)std::lround((float)b0 + t * (float)(b1 - b0));
     b = std::max(b, base_default);
     return std::clamp(b, 0, 16);
-}
-
-static bool detect_strong_transient(const std::vector<float>& energy0,
-                                    const std::vector<float>& energy1,
-                                    int band_count,
-                                    bool stereo,
-                                    float threshold) {
-    if (band_count < 3) return false;
-    float total = 0.0f, high = 0.0f;
-    int high_start = band_count / 4;
-    for (int i = 0; i < band_count; ++i) {
-        float e = energy0[i] + (stereo ? energy1[i] : 0.0f);
-        total += e;
-        if (i >= high_start) high += e;
-    }
-    if (total < 1e-12f) return false;
-    return ((high / total) > 0.15);
 }
 
 std::vector<uint8_t> compress_block_adaptive_joint(
@@ -157,6 +137,26 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         is_start_default = get_is_start_band(target_kbps, total_bands);
         if (is_start_default >= band_count)
             use_is = false;
+    }
+
+    bool adaptive_is = false;
+    if (use_is) {
+        bool in_range =
+            (target_kbps >= SETTINGS.adaptive_is_kbps_min &&
+             target_kbps <= SETTINGS.adaptive_is_kbps_max);
+        bool allow_adaptive =
+            SETTINGS.enable_adaptive_is &&
+            (SETTINGS.adaptive_is_base_override != 0) &&
+            (in_range || SETTINGS.adaptive_is_base_override > 0);
+        if (allow_adaptive) {
+            int base_max = get_adaptive_is_max_base(target_kbps, SETTINGS);
+            is_start_max = get_is_start_from_base(base_max, total_bands);
+            if (is_start_max < is_start_default)
+                is_start_max = is_start_default;
+            if (is_start_max > band_count)
+                is_start_max = band_count;
+            adaptive_is = true;
+        }
     }
 
     bool adaptive_is = false;
