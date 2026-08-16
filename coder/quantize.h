@@ -139,6 +139,17 @@ inline QuantResult quantize_levels(
         quantized_per_level[l] = std::move(quantized);
     }
 
+    // for (auto y : quantized_per_level) {
+    //     int64_t k = 0;
+    //     for (auto x : y) {
+    //         k += std::abs(x);
+    //         // std::cout << x << ' ';
+    //     }
+    //     std::cout << k << ' ';
+    //     std::cout << "| "; 
+    // }
+    // std::cout << '\n';
+
     return { scales, quantized_per_level };
 }
 

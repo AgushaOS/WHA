@@ -21,14 +21,31 @@ inline DualAllocResult allocate_bits_dual(
     int total_bits_budget,
     std::vector<int>& min_bits_in,
     std::vector<int>& max_bits_in,
-    std::vector<float>& energy0,
-    std::vector<float>& energy1,
+    std::vector<float> energy0,
+    std::vector<float> energy1,
     int reservoir,
     int reservoir_max,
-    float target_kbps)
+    float target_kbps,
+    bool stereo)
 {
     const int n = static_cast<int>(priority0.size());
     const float eps = 1e-12f;
+
+    if (target_kbps / (stereo ? 2 : 1) < 64) { 
+        for (auto& x : energy1) {
+            x *= 0.7;
+        }
+        // if (target_kbps / (stereo ? 2 : 1) < 48) {
+        // }
+
+        // for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
+        //     energy0[i] *= 0.25;
+        // }
+
+    }
+
+
+
 
     static thread_local std::vector<int> bits0, bits1, max_b, active;
     static thread_local std::vector<float> s2_0, s2_1, factor0, factor1, global_score;
@@ -40,10 +57,49 @@ inline DualAllocResult allocate_bits_dual(
     global_score.resize(n);
     active.assign(n, 1);
 
-    if (target_kbps < 128) {
-        bits0[0] = 4; bits1[0] = 4;
+    if (stereo) {
+        if (target_kbps < 128) {
+
+            if (target_kbps >= 96) {
+                // bits0[0] = 4;
+                // bits1[0] = 3;
+                if (energy0[0] > energy1[0]) {
+                    bits0[0] = 4;
+                    bits1[0] = 3;
+                } else {
+                    bits0[0] = 3;
+                    bits1[0] = 4; 
+                }
+            } else {
+                if (target_kbps >= 0) { 
+                    bits0[0] = 4;
+                    bits1[0] = 3;
+                }
+                // bits0[0] = 4;
+                // bits1[0] = 3;
+                // if (energy0[0] > energy1[0]) {
+                //     bits0[0] = 4;
+                //     // bits1[0] = 3;
+                // } else {
+                //     // bits0[0] = 4;
+                //     bits1[0] = 4; 
+                // }
+            }
+        } else {
+            if (energy0[0] > energy1[0]) {
+                bits0[0] = 5;
+                bits1[0] = 4;
+            } else {
+                bits1[0] = 5;
+                bits0[0] = 4; 
+            }
+        }
     } else {
-        bits0[0] = 5; bits1[0] = 4;
+        if (target_kbps <= 64) {
+            bits0[0] = 4;
+        } else {
+            bits0[0] = 5;
+        }
     }
 
     for (int i = 0; i < n; i++) {
