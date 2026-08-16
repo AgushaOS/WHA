@@ -278,7 +278,6 @@ void decompress_wha_to_wav(const std::string& in_wha,
                         ptr += inv_bytes;
                     }
                 }
-                ptr += inv_bytes;
             }
         }
 
