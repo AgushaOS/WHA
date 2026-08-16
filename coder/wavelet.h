@@ -128,6 +128,7 @@ private:
         float s = std::sqrt(x);
         return s * std::sqrt(s);
     }
+
     std::vector<int> gray_permutation(int level) const {
         int n = 1 << level;
         std::vector<int> perm(n);
@@ -135,6 +136,7 @@ private:
             perm[i] = i ^ (i >> 1);
         return perm;
     }
+
 public:
     std::vector<std::vector<float>> wpt(const std::vector<float>& signal,
                                         int levels,

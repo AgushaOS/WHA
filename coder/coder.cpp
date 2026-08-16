@@ -159,6 +159,25 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
+    bool adaptive_is = false;
+    if (use_is) {
+        bool in_range =
+            (target_kbps >= SETTINGS.adaptive_is_kbps_min &&
+             target_kbps <= SETTINGS.adaptive_is_kbps_max);
+        bool allow_adaptive =
+            SETTINGS.enable_adaptive_is &&
+            (SETTINGS.adaptive_is_base_override != 0) &&
+            (in_range || SETTINGS.adaptive_is_base_override > 0);
+        if (allow_adaptive) {
+            int base_max = get_adaptive_is_max_base(target_kbps, SETTINGS);
+            is_start_max = get_is_start_from_base(base_max, total_bands);
+            if (is_start_max < is_start_default)
+                is_start_max = is_start_default;
+            if (is_start_max > band_count)
+                is_start_max = band_count;
+            adaptive_is = true;
+        }
+    }
     if (stereo) {
         int low_end = use_is ? is_start_default : band_count;
         for (int i = 0; i < low_end; ++i) {
@@ -264,7 +283,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                                             target_kbps, sr, level, false);
         priority1.assign(band_count, 0.0f);
     }
-
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
     if (use_is) {
@@ -318,11 +336,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<uint8_t> mode_bytes_vec((band_count + 7) / 8, 0);
     for (int i = 0; i < band_count; ++i)
         if (mode_ms[i]) mode_bytes_vec[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask0(mask_bytes, 0);
     for (int i = 0; i < band_count; ++i)
         if (active0[i]) mask0[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask1;
     if (stereo) {
         mask1.assign(mask_bytes, 0);
@@ -720,7 +736,6 @@ compress_audio_streaming(const std::string& input_path,
         reservoir += target_bits - real_bits;
         if (reservoir < 0) reservoir = 0;
         if (reservoir > max_reservoir) reservoir = max_reservoir;
-
         blocks_raw.push_back(comp);
         block_modes.push_back(!is_transient);
 
