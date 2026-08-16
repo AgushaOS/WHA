@@ -21,6 +21,9 @@
 #include "joint_stereo.h"
 #include "quantize.h"
 #include "entropy_encoder.h"
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #include "settings.h"
 #include "pred_state.h"
@@ -68,6 +71,23 @@ static int get_adaptive_is_max_base(float target_kbps, const EncoderSettings& s)
     int b = (int)std::lround((float)b0 + t * (float)(b1 - b0));
     b = std::max(b, base_default);
     return std::clamp(b, 0, 16);
+}
+
+static bool detect_strong_transient(const std::vector<float>& energy0,
+                                    const std::vector<float>& energy1,
+                                    int band_count,
+                                    bool stereo,
+                                    float threshold) {
+    if (band_count < 3) return false;
+    float total = 0.0f, high = 0.0f;
+    int high_start = band_count / 4;
+    for (int i = 0; i < band_count; ++i) {
+        float e = energy0[i] + (stereo ? energy1[i] : 0.0f);
+        total += e;
+        if (i >= high_start) high += e;
+    }
+    if (total < 1e-12f) return false;
+    return ((high / total) > 0.15);
 }
 
 std::vector<uint8_t> compress_block_adaptive_joint(
@@ -158,7 +178,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             adaptive_is = true;
         }
     }
-
     if (stereo) {
         int low_end = use_is ? is_start_default : band_count;
         for (int i = 0; i < low_end; ++i) {
@@ -264,7 +283,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                                             target_kbps, sr, level, false);
         priority1.assign(band_count, 0.0f);
     }
-
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
     if (use_is) {
@@ -318,11 +336,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<uint8_t> mode_bytes_vec((band_count + 7) / 8, 0);
     for (int i = 0; i < band_count; ++i)
         if (mode_ms[i]) mode_bytes_vec[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask0(mask_bytes, 0);
     for (int i = 0; i < band_count; ++i)
         if (active0[i]) mask0[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask1;
     if (stereo) {
         mask1.assign(mask_bytes, 0);
@@ -720,7 +736,6 @@ compress_audio_streaming(const std::string& input_path,
         reservoir += target_bits - real_bits;
         if (reservoir < 0) reservoir = 0;
         if (reservoir > max_reservoir) reservoir = max_reservoir;
-
         blocks_raw.push_back(comp);
         block_modes.push_back(!is_transient);
 

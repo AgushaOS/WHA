@@ -166,7 +166,6 @@ void decompress_wha_to_wav(const std::string& in_wha,
             active0[i] = (byte >> (i & 7)) & 1;
         }
         ptr += mask_bytes;
-
         std::vector<uint8_t> active1;
         if (stereo) {
             active1.assign(expected_band_count, 0);
@@ -279,6 +278,7 @@ void decompress_wha_to_wav(const std::string& in_wha,
                         ptr += inv_bytes;
                     }
                 }
+                ptr += inv_bytes;
             }
         }
 
