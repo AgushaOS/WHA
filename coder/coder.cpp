@@ -159,25 +159,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
-    bool adaptive_is = false;
-    if (use_is) {
-        bool in_range =
-            (target_kbps >= SETTINGS.adaptive_is_kbps_min &&
-             target_kbps <= SETTINGS.adaptive_is_kbps_max);
-        bool allow_adaptive =
-            SETTINGS.enable_adaptive_is &&
-            (SETTINGS.adaptive_is_base_override != 0) &&
-            (in_range || SETTINGS.adaptive_is_base_override > 0);
-        if (allow_adaptive) {
-            int base_max = get_adaptive_is_max_base(target_kbps, SETTINGS);
-            is_start_max = get_is_start_from_base(base_max, total_bands);
-            if (is_start_max < is_start_default)
-                is_start_max = is_start_default;
-            if (is_start_max > band_count)
-                is_start_max = band_count;
-            adaptive_is = true;
-        }
-    }
     if (stereo) {
         int low_end = use_is ? is_start_default : band_count;
         for (int i = 0; i < low_end; ++i) {
