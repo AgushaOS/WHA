@@ -15,3 +15,4 @@ g++ -o decode decoder/decoder.cpp \
 -march=native -ffast-math \
 -std=c++23 \
  -lfftw3f -lm \
+

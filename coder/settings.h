@@ -9,7 +9,7 @@ struct EncoderSettings {
     bool  enable_adaptive_is              = true;
     float adaptive_is_kbps_min            = 128.0f;
     float adaptive_is_kbps_max            = 159.0f;
-    int   adaptive_is_base_at_64          = 2;
+    int   adaptive_is_base_at_64          = 3;
     int   adaptive_is_base_at_96          = 4;
     int   adaptive_is_base_at_128         = 6;
     int   adaptive_is_base_at_160         = 12;
