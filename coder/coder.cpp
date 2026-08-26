@@ -264,7 +264,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                                             target_kbps, sr, level, false);
         priority1.assign(band_count, 0.0f);
     }
-
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
     if (use_is) {
@@ -318,11 +317,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<uint8_t> mode_bytes_vec((band_count + 7) / 8, 0);
     for (int i = 0; i < band_count; ++i)
         if (mode_ms[i]) mode_bytes_vec[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask0(mask_bytes, 0);
     for (int i = 0; i < band_count; ++i)
         if (active0[i]) mask0[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask1;
     if (stereo) {
         mask1.assign(mask_bytes, 0);
@@ -720,7 +717,6 @@ compress_audio_streaming(const std::string& input_path,
         reservoir += target_bits - real_bits;
         if (reservoir < 0) reservoir = 0;
         if (reservoir > max_reservoir) reservoir = max_reservoir;
-
         blocks_raw.push_back(comp);
         block_modes.push_back(!is_transient);
 
