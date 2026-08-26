@@ -32,9 +32,9 @@ inline DualAllocResult allocate_bits_dual(
     const float eps = 1e-12f;
 
     if (target_kbps / (stereo ? 2 : 1) < 64) { 
-        for (auto& x : energy1) {
-            x *= 0.7;
-        }
+        // for (auto& x : energy1) {
+        //     x *= 0.7;
+        // }
         // if (target_kbps / (stereo ? 2 : 1) < 48) {
         // }
 
@@ -60,7 +60,7 @@ inline DualAllocResult allocate_bits_dual(
     if (stereo) {
         if (target_kbps < 128) {
 
-            if (target_kbps >= 96) {
+            if (target_kbps >= 64) {
                 // bits0[0] = 4;
                 // bits1[0] = 3;
                 if (energy0[0] > energy1[0]) {

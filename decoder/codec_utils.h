@@ -23,6 +23,7 @@ inline std::vector<bool> unpack_bits(const uint8_t* data, int bytes, int total_b
 }
 
 inline std::vector<int> compute_band_shapes(int block_size, int level) {
+    // block_size /= 2;
     std::vector<int> shapes = {block_size};
     for (int l = 0; l < level; ++l) {
         std::vector<int> new_shapes;

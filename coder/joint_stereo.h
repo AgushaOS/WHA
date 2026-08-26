@@ -372,7 +372,7 @@ inline bool should_use_is_band(const std::vector<float>& left,
         ? equal_ratio_threshold_low_bitrate
         : equal_ratio_threshold;
 
-    return (ratio <= (double)equal_thr && ms_benefit);
+    return (ms_benefit);
 }
 
 #endif // JOINT_STEREO_H

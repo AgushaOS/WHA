@@ -166,10 +166,10 @@ public:
                 float* begin = data.data() + i * band_size;
                 float* end = begin + band_size;
                 for (float* p = begin; p != end; ++p)
-                    *p *= 0.25f;
+                    *p *= 0.125f;
             }
 
-            if (48 <= bitrate / float(channels) && bitrate / float(channels) < 64) {
+            if (32 <= bitrate / float(channels) && bitrate / float(channels) < 64) {
                 for (int i = atten_start; i < total_bands; ++i) {
                     float* begin = data.data() + i * band_size;
                     float* end = begin + band_size;
@@ -177,26 +177,6 @@ public:
                         *p *= 0.125f;
                 }
             }
-
-            // int cutoff_mid = total_bands * 4 / 8;
-            // if (bitrate / float(channels) < 48.0f) {
-            //     for (int i = cutoff_mid; i < total_bands; ++i) {
-            //         float* begin = data.data() + i * band_size;
-            //         float* end = begin + band_size;
-            //         for (float* p = begin; p != end; ++p)
-            //             *p *= 0.25f;
-            //     }
-            // }
-
-            // int cutoff_low = total_bands / 4;
-            // if (bitrate / float(channels) < 32.0f) {
-            //     for (int i = cutoff_low; i < total_bands; ++i) {
-            //         float* begin = data.data() + i * band_size;
-            //         float* end = begin + band_size;
-            //         for (float* p = begin; p != end; ++p)
-            //             *p *= 0.0f;
-            //     }
-            // }
         }
 
         std::vector<std::vector<float>> tree(total_bands);

@@ -180,19 +180,13 @@ public:
         if (sr >= 44100) {
             int atten_start = total_bands * 3 / 4;
             for (size_t i = atten_start; i < subbands.size(); ++i)
-                for (float& x : subbands[i]) x *= 4.0f;
+                for (float& x : subbands[i]) x *= 8.0f;
 
-            if (48 <= target_kbps / float(channels) &&
+            if (32 <= target_kbps / float(channels) &&
                 target_kbps / float(channels) < 64) {
                 for (size_t i = atten_start; i < subbands.size(); ++i)
                     for (float& x : subbands[i]) x *= 8.0f;
             }
-
-            // int cutoff_mid = total_bands * 4 / 8;
-            // if (target_kbps / float(channels) < 48.0f) {
-            //     for (size_t i = cutoff_mid; i < subbands.size(); ++i)
-            //         for (float& x : subbands[i]) x *= 4.0f;
-            // }
         }
 
 
