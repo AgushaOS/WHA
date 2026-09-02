@@ -414,3 +414,4 @@ static inline bool shouldApplySpectralFloor(int num_channels, float target_kbps)
 }
 
 #endif // POSTFILTER_H
+

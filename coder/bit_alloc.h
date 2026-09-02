@@ -45,8 +45,6 @@ inline DualAllocResult allocate_bits_dual(
     }
 
 
-
-
     static thread_local std::vector<int> bits0, bits1, max_b, active;
     static thread_local std::vector<float> s2_0, s2_1, factor0, factor1, global_score;
     bits0.assign(min_bits_in.begin(), min_bits_in.end());

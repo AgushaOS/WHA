@@ -27,8 +27,8 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
 
 inline int get_is_base_original(float target_kbps) {
     if (target_kbps < 64.0f)        return 1;
-    else if (target_kbps < 96.0f)   return 2;
-    else if (target_kbps < 128.0f)  return 3;
+    else if (target_kbps < 96.0f)   return 1;
+    else if (target_kbps < 128.0f)  return 2;
     else if (target_kbps < 160.0f)  return 4;
     else if (target_kbps < 190.0f)  return 8;
     else if (target_kbps < 224.0f)  return 14;

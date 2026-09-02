@@ -224,8 +224,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 } else {
                     is_band[i] = 0;
                     mode_ms[i] = 0;
-                    ch0_bands[i] = left_coeffs[i];
-                    ch1_bands[i] = right_coeffs[i];
+                    auto [mid, side] = mid_side(left_coeffs[i], right_coeffs[i]);
+                    ch0_bands[i] = mid;//left_coeffs[i];
+                    ch1_bands[i] = side;//right_coeffs[i];
                 }
             }
         }
