@@ -27,8 +27,8 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
 
 inline int get_is_base_original(float target_kbps) {
     if (target_kbps < 64.0f)        return 1;
-    else if (target_kbps < 96.0f)   return 2;
-    else if (target_kbps < 128.0f)  return 3;
+    else if (target_kbps < 96.0f)   return 1;
+    else if (target_kbps < 128.0f)  return 2;
     else if (target_kbps < 160.0f)  return 4;
     else if (target_kbps < 190.0f)  return 8;
     else if (target_kbps < 224.0f)  return 14;
@@ -330,49 +330,82 @@ inline bool should_use_is_band(const std::vector<float>& left,
                                float equal_ratio_threshold,
                                float equal_ratio_threshold_low_bitrate)
 {
-    size_t n = std::min(left.size(), right.size());
+    const size_t n = std::min(left.size(), right.size());
+
     if (n == 0)
         return false;
 
-    double eL = 0.0, eR = 0.0;
+    const double eps = 1e-12;
+
+    double eL = 0.0;
+    double eR = 0.0;
+    double cross = 0.0;
 
     for (size_t i = 0; i < n; ++i) {
-        eL += (double)left[i] * left[i];
-        eR += (double)right[i] * right[i];
+        const double L = (double)left[i];
+        const double R = (double)right[i];
+
+        eL += L * L;
+        eR += R * R;
+        cross += L * R;
     }
 
-    const double eps = 1e-12;
     if (eL + eR < eps)
         return false;
 
-    double meanL = eL / (double)n;
-    double meanR = eR / (double)n;
+    const double correlation =
+        cross / (std::sqrt(eL * eR) + eps);
 
-    double minE = std::min(meanL, meanR);
-    double maxE = std::max(meanL, meanR);
-    double ratio = maxE / (minE + eps);
+    const double abs_correlation =
+        std::abs(correlation);
+
+    constexpr double IS_CORRELATION_THRESHOLD = 0.40;
+
+    if (abs_correlation >= IS_CORRELATION_THRESHOLD)
+        return true;
+
+    const double meanL = eL / (double)n;
+    const double meanR = eR / (double)n;
+
+    const double minE = std::min(meanL, meanR);
+    const double maxE = std::max(meanL, meanR);
+
+    const double ratio =
+        maxE / (minE + eps);
 
     if (ratio > (double)strong_ratio_threshold)
         return true;
 
-    double eM = 0.0, eS = 0.0;
+    double eM = 0.0;
+    double eS = 0.0;
 
     for (size_t i = 0; i < n; ++i) {
-        double m = ((double)left[i] + (double)right[i]) * 0.5;
-        double s = ((double)left[i] - (double)right[i]) * 0.5;
 
-        eM += m * m;
-        eS += s * s;
+        const double L = (double)left[i];
+        const double R = (double)right[i];
+
+        const double M =
+            (L + R) * 0.5;
+
+        const double S =
+            (L - R) * 0.5;
+
+        eM += M * M;
+        eS += S * S;
     }
 
-    bool ms_benefit = use_mid_side((float)eL, (float)eR, (float)eM, (float)eS,
-                                   enable_ms, target_kbps);
+    const bool ms_benefit =
+        use_mid_side(
+            (float)eL,
+            (float)eR,
+            (float)eM,
+            (float)eS,
+            enable_ms,
+            target_kbps
+        );
 
-    float equal_thr = (target_kbps < 128.0f)
-        ? equal_ratio_threshold_low_bitrate
-        : equal_ratio_threshold;
-
-    return (ms_benefit);
+    return ms_benefit ||
+           maxE >= minE * 4.0;
 }
 
 #endif // JOINT_STEREO_H

@@ -392,6 +392,16 @@ void decompress_wha_to_wav(const std::string& in_wha,
                         ch0_bands[i] = std::move(left_tmp);
                         ch1_bands[i] = std::move(right_tmp);
                     }
+                } 
+                else {
+                    if (block_format_version >= 18 && is_used &&
+                        i >= is_start && is_start < expected_band_count)
+                    {
+                        std::vector<float> left_tmp, right_tmp;
+                        ms_to_lr(ch0_bands[i], ch1_bands[i], left_tmp, right_tmp);
+                        ch0_bands[i] = std::move(left_tmp);
+                        ch1_bands[i] = std::move(right_tmp);
+                    }
                 }
             }
         }
