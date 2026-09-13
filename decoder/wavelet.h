@@ -202,9 +202,10 @@ public:
         
         float kbps_per_channel = target_kbps / float(channels);
         apply_temporal_dither(pcm, kbps_per_channel);
-        
+
         return pcm;
     }
 };
+
 
 #endif // WAVELET_H

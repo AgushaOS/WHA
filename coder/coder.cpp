@@ -29,6 +29,8 @@
 #include "energy_shape.h"
 #include "sbr_encode.h"
 
+#include "pow_filter.h"     
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -225,8 +227,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                     is_band[i] = 0;
                     mode_ms[i] = 0;
                     auto [mid, side] = mid_side(left_coeffs[i], right_coeffs[i]);
-                    ch0_bands[i] = mid;//left_coeffs[i];
-                    ch1_bands[i] = side;//right_coeffs[i];
+                    ch0_bands[i] = mid;
+                    ch1_bands[i] = side;
                 }
             }
         }
@@ -607,6 +609,8 @@ compress_audio_streaming(const std::string& input_path,
     std::vector<bool>                 block_modes;
     PredContext pred_ctx;
 
+    PowCodec pow_enc(num_channels, 0.85f, true);
+
     int   current_pos     = 0;
     int   prev_block_size = 1024;
     float bits_per_sample = target_kbps * 1000.0f / sr;
@@ -616,15 +620,34 @@ compress_audio_streaming(const std::string& input_path,
     std::vector<float> audio_buffer;
     size_t buffer_start = 0;
 
+    bool eof          = false;
+    bool pow_flushed  = false;
+
     auto ensure_data_available = [&](int needed_pos) {
         while ((int)(buffer_start + audio_buffer.size() / num_channels) < needed_pos) {
+            if (eof) {
+                if (!pow_flushed) {
+                    pow_flushed = true;
+                    std::vector<float> tail;
+                    pow_enc.flush(tail);
+                    audio_buffer.insert(audio_buffer.end(), tail.begin(), tail.end());
+                    if (!tail.empty()) continue;
+                }
+                break;
+            }
             size_t samples_to_read = read_buffer_size_samples * num_channels;
             std::vector<float> chunk(samples_to_read);
             drwav_uint64 frames_read =
                 drwav_read_pcm_frames_f32(&wav, read_buffer_size_samples, chunk.data());
-            if (frames_read == 0) break;
+            if (frames_read == 0) {
+                eof = true;
+                continue;
+            }
             chunk.resize(frames_read * num_channels);
-            audio_buffer.insert(audio_buffer.end(), chunk.begin(), chunk.end());
+            std::vector<float> processed;
+            processed.reserve(chunk.size());
+            pow_enc.process(chunk.data(), (size_t)frames_read, processed);
+            audio_buffer.insert(audio_buffer.end(), processed.begin(), processed.end());
         }
     };
 

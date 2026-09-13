@@ -24,6 +24,8 @@
 #include "sbr_decode.h"
 #include "overlap_add.h"
 
+#include "pow_filter.h"     
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -77,6 +79,8 @@ void decompress_wha_to_wav(const std::string& in_wha,
     ModeState short_state;
     bool      stereo = (num_channels == 2);
 
+    PowCodec pow_dec((int)num_channels, 0.85f, false);
+
     OverlapAddState ola;
     ola.init(num_channels, write_batch_frames);
 
@@ -89,18 +93,25 @@ void decompress_wha_to_wav(const std::string& in_wha,
         postproc = std::make_unique<SpectralFloorPostProcessor>((int)num_channels, pp_cfg);
     }
 
+    auto write_samples = [&](const std::vector<float>& samples) {
+        if (samples.empty()) return;
+        size_t frames = samples.size() / num_channels;
+        if (frames == 0) return;
+        if (postproc) {
+            int n_out = postproc->process(samples.data(), (int)frames);
+            if (n_out > 0)
+                drwav_write_pcm_frames(&wav, (uint64_t)n_out, postproc->out_data());
+        } else {
+            drwav_write_pcm_frames(&wav, frames, samples.data());
+        }
+    };
+
     auto flush_write_buffer = [&]() {
         if (write_buf.empty()) return;
-        size_t frames = write_buf.size() / num_channels;
-        if (frames > 0) {
-            if (postproc) {
-                int n_out = postproc->process(write_buf.data(), (int)frames);
-                if (n_out > 0)
-                    drwav_write_pcm_frames(&wav, (uint64_t)n_out, postproc->out_data());
-            } else {
-                drwav_write_pcm_frames(&wav, frames, write_buf.data());
-            }
-        }
+        std::vector<float> decoded;
+        decoded.reserve(write_buf.size());
+        pow_dec.process(write_buf.data(), write_buf.size() / num_channels, decoded);
+        write_samples(decoded);
         write_buf.clear();
     };
 
@@ -392,7 +403,7 @@ void decompress_wha_to_wav(const std::string& in_wha,
                         ch0_bands[i] = std::move(left_tmp);
                         ch1_bands[i] = std::move(right_tmp);
                     }
-                } 
+                }
                 else {
                     if (block_format_version >= 18 && is_used &&
                         i >= is_start && is_start < expected_band_count)
@@ -459,6 +470,10 @@ void decompress_wha_to_wav(const std::string& in_wha,
 
     extract_remaining(ola, write_buf);
     flush_write_buffer();
+
+    std::vector<float> pow_tail;
+    pow_dec.flush(pow_tail);
+    write_samples(pow_tail);
 
     if (postproc) {
         int n_out = postproc->flush();
