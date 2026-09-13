@@ -1,4 +1,4 @@
-# Wavelet Hierarchical Audio
+# Wavelet Hierarchical Audio (Outdated, will be updated soon enough)
 
 WHA (Wavelet Hierarchical Audio, Вейвлет-иерархическое Аудио) -- это высокопроизводительный перцептивный аудиокодек, основанный на вейвлет-пакетном разложении сигнала. 
 
