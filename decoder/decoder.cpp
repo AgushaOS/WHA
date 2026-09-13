@@ -37,9 +37,9 @@ void decompress_wha_to_wav(const std::string& in_wha,
     std::ifstream f(in_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + in_wha);
 
-    auto magic = read_n(f, 4);
-    if (magic.size() != 4 || std::string((char*)magic.data(), 4) != "WHA1")
-        throw std::runtime_error("Not a WHA container");
+    drwav wav;
+    if (!drwav_init_file_write(&wav, out_wav.c_str(), &fmt, nullptr))
+        throw std::runtime_error("dr_wav failed to init");
 
     uint8_t version = read_u8(f);
     if (version != 18 && version != 19 && version != 20)
@@ -177,7 +177,6 @@ void decompress_wha_to_wav(const std::string& in_wha,
             active0[i] = (byte >> (i & 7)) & 1;
         }
         ptr += mask_bytes;
-
         std::vector<uint8_t> active1;
         if (stereo) {
             active1.assign(expected_band_count, 0);
