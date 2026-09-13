@@ -220,4 +220,3 @@ inline void sbr_synthesize(std::vector<std::vector<float>>& ch0_bands,
         }
     }
 }
-

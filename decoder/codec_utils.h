@@ -5,7 +5,7 @@
 #include <algorithm>
 
 static constexpr float SCALE_LOG_MIN = -6.0f;
-static constexpr float SCALE_LOG_MAX =  0.0f;
+static constexpr float SCALE_LOG_MAX =  1.0f;
 
 inline int get_scale_bits(int band_idx) {
     if (band_idx < 1) return 12;

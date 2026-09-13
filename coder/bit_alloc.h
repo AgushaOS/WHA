@@ -59,8 +59,6 @@ inline DualAllocResult allocate_bits_dual(
         if (target_kbps < 128) {
 
             if (target_kbps >= 64) {
-                // bits0[0] = 4;
-                // bits1[0] = 3;
                 if (energy0[0] > energy1[0]) {
                     bits0[0] = 4;
                     bits1[0] = 3;

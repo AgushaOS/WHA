@@ -52,7 +52,7 @@ inline float scale_and_bits_to_step(float scale, int bits) {
 }
 
 static constexpr float SCALE_LOG_MIN = -6.0f;
-static constexpr float SCALE_LOG_MAX =  0.0f;
+static constexpr float SCALE_LOG_MAX =  1.0f;
 
 inline uint32_t get_scale_idx(float step, int sb) {
     if (step <= 0.0f) return 0;
