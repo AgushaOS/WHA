@@ -451,6 +451,7 @@ private:
 };
 
 static inline bool shouldApplySpectralFloor(int num_channels, float target_kbps) {
+    return false;
     if (num_channels == 2 && target_kbps < 128.0f) return true;
     if (num_channels == 1 && target_kbps <  80.0f) return true;
     return false;

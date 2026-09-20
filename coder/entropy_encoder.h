@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <climits>
 #include <cstring>
+#include <algorithm>
 
 inline uint32_t zigzag_encode(int32_t n) {
     return (n << 1) ^ (n >> 31);
@@ -58,7 +59,7 @@ inline int estimate_order_bits(const std::vector<int32_t>& data, int order) {
     for (size_t i = 0; i < residual.size(); ++i)
         uvals[i] = zigzag_encode(residual[i]);
     auto [k, bits] = rice_optimal_k_and_cost(uvals);
-    return bits + 2 + 4; 
+    return bits + 2 + 4;
 }
 
 inline int select_best_order(const std::vector<int32_t>& data, int band_idx) {
@@ -82,23 +83,32 @@ private:
     std::vector<uint8_t> data_;
     uint64_t buffer_ = 0;
     int bit_count_ = 0;
+
 public:
     void write_bit(bool bit) {
         buffer_ = (buffer_ << 1) | (bit ? 1 : 0);
-        bit_count_++;
-        if (bit_count_ == 64) flush64();
+        if (++bit_count_ == 64) flush64();
     }
-    void write_bits(uint32_t value, int num_bits) {
+
+    void write_bits(uint64_t value, int num_bits) {
         if (num_bits <= 0) return;
-        if (bit_count_ + num_bits <= 64) {
-            buffer_ = (buffer_ << num_bits) | (value & ((1ULL << num_bits) - 1));
-            bit_count_ += num_bits;
+        while (num_bits > 0) {
+            int space = 64 - bit_count_;
+            int to_write = (num_bits < space) ? num_bits : space;
+            
+            int shift = num_bits - to_write;
+            uint64_t mask = (to_write == 64) ? ~0ULL : ((1ULL << to_write) - 1);
+            uint64_t chunk = (value >> shift) & mask;
+            
+            buffer_ = (buffer_ << to_write) | chunk;
+            bit_count_ += to_write;
+            
             if (bit_count_ == 64) flush64();
-        } else {
-            for (int i = num_bits - 1; i >= 0; --i)
-                write_bit((value >> i) & 1);
+            
+            num_bits -= to_write;
         }
     }
+
     void flush64() {
         if (bit_count_ >= 64) {
             for (int i = 7; i >= 0; --i)
@@ -107,6 +117,7 @@ public:
             bit_count_ = 0;
         }
     }
+
     void flush() {
         while (bit_count_ >= 8) {
             int shift = bit_count_ - 8;
@@ -120,6 +131,7 @@ public:
         buffer_ = 0;
         bit_count_ = 0;
     }
+
     const std::vector<uint8_t>& data() const { return data_; }
     size_t size() const { return data_.size() * 8 + bit_count_; }
 };
@@ -128,9 +140,15 @@ inline void rice_encode(BitWriterMSB& writer, const std::vector<uint32_t>& data,
     for (uint32_t x : data) {
         uint32_t q = x >> k;
         uint32_t r = x & ((1u << k) - 1);
-        for (uint32_t i = 0; i < q; ++i) writer.write_bit(1);
-        writer.write_bit(0);
-        writer.write_bits(r, k);
+        
+        if (q > 0) {
+            writer.write_bits(~0ULL, q);
+        }
+        writer.write_bits(0, 1);
+        
+        if (k > 0) {
+            writer.write_bits(r, k);
+        }
     }
 }
 
