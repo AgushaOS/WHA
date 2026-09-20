@@ -37,6 +37,10 @@ void decompress_wha_to_wav(const std::string& in_wha,
     std::ifstream f(in_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + in_wha);
 
+    auto magic = read_n(f, 4);
+    if (magic.size() != 4 || std::string((char*)magic.data(), 4) != "WHA1")
+        throw std::runtime_error("Not a WHA container");
+
     uint8_t version = read_u8(f);
     if (version != 18 && version != 19 && version != 20)
         throw std::runtime_error("Unsupported container version (only v18/v19/v20)");
@@ -50,10 +54,10 @@ void decompress_wha_to_wav(const std::string& in_wha,
     if (block_format_version != 18 && block_format_version != 19 && block_format_version != 20)
         throw std::runtime_error("Unsupported block format version (only v18/v19/v20)");
 
+    bool pred_enabled = (block_format_version >= 19);
+
     float per_channel_kbps = target_kbps / num_channels;
     float overlap_factor   = (per_channel_kbps <= 0.0f) ? 0.0f : 1.0f;
-
-    bool pred_enabled = (block_format_version >= 19);
 
     int mode_bytes = (block_count + 7) / 8;
     std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
@@ -173,6 +177,7 @@ void decompress_wha_to_wav(const std::string& in_wha,
             active0[i] = (byte >> (i & 7)) & 1;
         }
         ptr += mask_bytes;
+
         std::vector<uint8_t> active1;
         if (stereo) {
             active1.assign(expected_band_count, 0);
@@ -532,4 +537,4 @@ int main(int argc, char** argv) {
     }
 
     return 0;
-} // DECODER
+}
