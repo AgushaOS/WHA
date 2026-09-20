@@ -52,8 +52,6 @@ void decompress_wha_to_wav(const std::string& in_wha,
     if (block_format_version != 18 && block_format_version != 19 && block_format_version != 20)
         throw std::runtime_error("Unsupported block format version (only v18/v19/v20)");
 
-    bool pred_enabled = (block_format_version >= 19);
-
     float per_channel_kbps = target_kbps / num_channels;
     float overlap_factor   = (per_channel_kbps <= 0.0f) ? 0.0f : 1.0f;
 
