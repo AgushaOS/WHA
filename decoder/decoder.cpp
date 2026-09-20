@@ -37,8 +37,6 @@ void decompress_wha_to_wav(const std::string& in_wha,
     std::ifstream f(in_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + in_wha);
 
-    bool pred_enabled = (block_format_version >= 19);
-
     uint8_t version = read_u8(f);
     if (version != 18 && version != 19 && version != 20)
         throw std::runtime_error("Unsupported container version (only v18/v19/v20)");
@@ -54,6 +52,8 @@ void decompress_wha_to_wav(const std::string& in_wha,
 
     float per_channel_kbps = target_kbps / num_channels;
     float overlap_factor   = (per_channel_kbps <= 0.0f) ? 0.0f : 1.0f;
+
+    bool pred_enabled = (block_format_version >= 19);
 
     int mode_bytes = (block_count + 7) / 8;
     std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
