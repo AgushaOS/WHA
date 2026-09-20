@@ -37,9 +37,7 @@ void decompress_wha_to_wav(const std::string& in_wha,
     std::ifstream f(in_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + in_wha);
 
-    drwav wav;
-    if (!drwav_init_file_write(&wav, out_wav.c_str(), &fmt, nullptr))
-        throw std::runtime_error("dr_wav failed to init");
+    bool pred_enabled = (block_format_version >= 19);
 
     uint8_t version = read_u8(f);
     if (version != 18 && version != 19 && version != 20)
@@ -536,4 +534,4 @@ int main(int argc, char** argv) {
     }
 
     return 0;
-}
+} // DECODER
