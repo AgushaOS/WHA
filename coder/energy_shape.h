@@ -93,14 +93,24 @@ inline void apply_highfreq_attenuation(std::vector<float>& e0, std::vector<float
                                        int band_count, float target_kbps,
                                        int num_channels, bool has_transient)
 {
-    if (target_kbps / float(num_channels) >= 48.0f) return;
+    if (target_kbps / float(num_channels) >= 64.0f) return;
 
-    int64_t start;
-    if (!has_transient)
-        start = 3 * (int64_t)e0.size() / 8;
-    else
-        start = 4 * (int64_t)e0.size() / 8;
+    if (target_kbps / float(num_channels) < 48.0) {
+        int64_t start;
+        if (!has_transient && target_kbps / float(num_channels) < 48)
+            start = 3 * (int64_t)e0.size() / 8;
+        else
+            start = 4 * (int64_t)e0.size() / 8;
 
-    for (int64_t i = start; i < (int64_t)e0.size(); ++i)
-        e0[i] *= 0.25f;
+        for (int64_t i = start; i < (int64_t)e0.size(); ++i)
+           e0[i] *= 0.25f;
+    } 
+    else {
+        const size_t half = e0.size() / 2;
+
+        if (!has_transient) {
+            for (size_t i = half; i < e0.size(); ++i)
+                e0[i] *= 0.25f;
+        }
+    }
 }
