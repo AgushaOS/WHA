@@ -442,6 +442,8 @@ void decompress_wha_to_wav(const std::string& in_wha,
               << ", ch=" << (int)num_channels << ")" << std::endl;
 }
 
+#include <sys/resource.h>
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: decoder <input.wha> <output.wav> [buffer_size_in_samples]" << std::endl;
@@ -487,4 +489,5 @@ int main(int argc, char** argv) {
     }
     
     return 0;
-}
+} // DECODER
+
