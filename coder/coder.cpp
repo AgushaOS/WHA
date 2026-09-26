@@ -606,7 +606,7 @@ compress_audio_streaming(const std::string& input_path,
     std::vector<bool>                 block_modes;
     PredContext pred_ctx;
 
-    PowCodec pow_enc(num_channels, 0.85f, true);
+    PowCodec pow_enc(num_channels, 0.85f, true, target_kbps / float(num_channels));
 
     int   current_pos     = 0;
     int   prev_block_size = 1024;
@@ -645,6 +645,7 @@ compress_audio_streaming(const std::string& input_path,
             processed.reserve(chunk.size());
             pow_enc.process(chunk.data(), (size_t)frames_read, processed);
             audio_buffer.insert(audio_buffer.end(), processed.begin(), processed.end());
+            // pow_enc.printProfile();
         }
     };
 
