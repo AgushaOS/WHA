@@ -195,6 +195,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             }
         }
         if (use_is) {
+            BandEnergy be = compute_band_energy(ch0_bands, ch1_bands, is_band, stereo, band_count);
+
             int is_seg_threshold = 6 * total_bands / 16;
             for (int i = is_start_default; i < band_count; ++i) {
                 bool force_is  = !adaptive_is || (i >= is_start_max);

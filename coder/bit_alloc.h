@@ -47,6 +47,10 @@ inline DualAllocResult allocate_bits_dual(
     for (auto& x : max_bits_in) {
         x = 8;
     }
+    
+    // for (int i = max_bits_in.size() / 2; i < max_bits_in.size(); i++) {
+    //     max_bits_in[i] = 0;
+    // }
 
     static thread_local std::vector<int> bits0, bits1, max_b, active;
     static thread_local std::vector<float> s2_0, s2_1, factor0, factor1, global_score;

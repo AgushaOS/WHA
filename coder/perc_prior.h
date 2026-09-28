@@ -9,7 +9,8 @@ inline std::vector<float> compute_channel_priority(
 {
     const float eps = 1e-12f;
 
-    int band_count = (int)coeffs.size();
+    const int band_count = (int)coeffs.size();
+
     if (prev_coeffs.size() != coeffs.size())
         prev_coeffs = coeffs;
 
@@ -17,33 +18,42 @@ inline std::vector<float> compute_channel_priority(
     priority.resize(band_count);
 
     float global_energy = 0.0f;
+
     for (const auto& band : coeffs)
         for (float v : band)
             global_energy += v * v;
 
-    float global_energy_sq = global_energy + eps;
+    const float global_energy_sq = global_energy + eps;
 
-    int total_bands = 1 << level;
+    const int total_bands = 1 << level;
 
     std::vector<float> weight_original(total_bands, 1.0f);
 
     for (int i = 0; i < total_bands; ++i) {
-        int popcnt = __builtin_popcount((unsigned)i);
-        float w = std::exp2((level - 2 * popcnt) * 0.5f);
+        const int popcnt =
+            __builtin_popcount((unsigned)i);
+
+        const float w =
+            std::exp2((level - 2 * popcnt) * 0.5f);
+
         weight_original[i] = w;
     }
 
-    std::vector<int> perm(total_bands);
-    for (int i = 0; i < total_bands; ++i)
-        perm[i] = i ^ (i >> 1);
+    std::vector<float> freq_weight(
+        band_count,
+        1.0f
+    );
 
-    std::vector<float> freq_weight(band_count, 1.0f);
+    for (int i = 0;
+         i < total_bands && i < band_count;
+         ++i)
+    {
+        const int old_index =
+            i ^ (i >> 1);
 
-    for (int i = 0; i < total_bands && i < band_count; ++i) {
-        int mapped = perm[i];
-        if (mapped < band_count) {
-            freq_weight[mapped] = weight_original[i] * 0.75f;
-        }
+        if (old_index < total_bands)
+            freq_weight[i] =
+                weight_original[old_index] * 0.75f;
     }
 
     for (int i = 0; i < band_count; ++i) {
@@ -55,27 +65,34 @@ inline std::vector<float> compute_channel_priority(
         float l1 = 0.0f;
 
         for (float v : cur) {
-            float a = std::fabs(v);
+            const float a = std::fabs(v);
             max_v = std::max(max_v, a);
             l1 += a;
         }
 
-        float mean = l1 / std::max<size_t>(cur.size(), 1);
+        const float mean =
+            l1 / std::max<size_t>(cur.size(), 1);
 
         float peakiness =
-            (max_v - mean) / (max_v + eps);
-        peakiness = std::clamp(peakiness, 0.0f, 1.0f);
+            (max_v - mean) /
+            (max_v + eps);
+
+        peakiness =
+            std::clamp(peakiness, 0.0f, 1.0f);
 
         float abs_energy = 0.0f;
+
         for (float v : cur)
             abs_energy += v * v;
 
         float energy_local =
-            std::sqrt(abs_energy + eps) / (std::sqrt(global_energy_sq) + eps);
+            std::sqrt(abs_energy + eps) /
+            (std::sqrt(global_energy_sq) + eps);
 
-        energy_local = std::clamp(energy_local, 0.0f, 1.0f);
+        energy_local =
+            std::clamp(energy_local, 0.0f, 1.0f);
 
-        float structure =
+        const float structure =
             0.65f * peakiness +
             0.35f * energy_local;
 
@@ -83,7 +100,8 @@ inline std::vector<float> compute_channel_priority(
         float norm_prev = 0.0f;
         float norm_cur = 0.0f;
 
-        size_t N = std::min(cur.size(), prev.size());
+        const size_t N =
+            std::min(cur.size(), prev.size());
 
         for (size_t k = 0; k < N; ++k) {
             corr += cur[k] * prev[k];
@@ -92,11 +110,14 @@ inline std::vector<float> compute_channel_priority(
         }
 
         float predict =
-            corr / (std::sqrt(norm_prev * norm_cur) + eps);
+            corr /
+            (std::sqrt(norm_prev * norm_cur) + eps);
 
-        predict = std::clamp(predict, 0.0f, 1.0f);
+        predict =
+            std::clamp(predict, 0.0f, 1.0f);
 
         float l2 = 0.0f;
+
         for (float v : cur)
             l2 += v * v;
 
@@ -106,58 +127,85 @@ inline std::vector<float> compute_channel_priority(
             (l1 * l1) /
             (cur.size() * l2 * l2 + eps);
 
-        sparsity = std::clamp(sparsity, 0.0f, 1.0f);
+        sparsity =
+            std::clamp(sparsity, 0.0f, 1.0f);
 
         float inter_scale = 0.5f;
 
         if (i > 0 && i < band_count - 1) {
 
-            auto band_energy = [&](int b) -> float {
+            auto band_energy =
+                [&](int b) -> float
+            {
                 float e = 0.0f;
-                for (float v : coeffs[b]) e += v * v;
+
+                for (float v : coeffs[b])
+                    e += v * v;
+
                 return std::sqrt(e + eps);
             };
 
-            float e_prev = band_energy(i - 1);
-            float e_next = band_energy(i + 1);
-            float e_cur  = std::sqrt(abs_energy + eps);
+            const float e_prev =
+                band_energy(i - 1);
 
-            float avg_neighbors = 0.5f * (e_prev + e_next);
+            const float e_next =
+                band_energy(i + 1);
+
+            const float e_cur =
+                std::sqrt(abs_energy + eps);
+
+            const float avg_neighbors =
+                0.5f * (e_prev + e_next);
 
             inter_scale =
-                1.0f - std::fabs(e_cur - avg_neighbors) /
-                       (avg_neighbors + eps);
+                1.0f -
+                std::fabs(e_cur - avg_neighbors) /
+                (avg_neighbors + eps);
 
-            inter_scale = std::clamp(inter_scale, 0.0f, 1.0f);
+            inter_scale =
+                std::clamp(inter_scale, 0.0f, 1.0f);
         }
 
-        float cur_peak = max_v;  
-        
-        float prev_peak = 0.0f;
-        for (float v : prev)
-            prev_peak = std::max(prev_peak, std::fabs(v));
+        const float cur_peak = max_v;
 
-        constexpr float PEAK_THRESHOLD = 0.01f;  
-        
+        float prev_peak = 0.0f;
+
+        for (float v : prev)
+            prev_peak =
+                std::max(prev_peak, std::fabs(v));
+
+        constexpr float PEAK_THRESHOLD = 0.01f;
+
         float transient = 0.0f;
-        
-        if (cur_peak > PEAK_THRESHOLD && prev_peak > PEAK_THRESHOLD) {
-            float peak_ratio = cur_peak / prev_peak;
-            
-            transient = std::log2(peak_ratio + 1.0f);
-            
-            transient = std::clamp(transient, 0.0f, 4.0f);
+
+        if (cur_peak > PEAK_THRESHOLD &&
+            prev_peak > PEAK_THRESHOLD)
+        {
+            const float peak_ratio =
+                cur_peak / prev_peak;
+
+            transient =
+                std::log2(peak_ratio + 1.0f);
+
+            transient =
+                std::clamp(
+                    transient,
+                    0.0f,
+                    4.0f
+                );
         }
 
         float p_val =
-            0.35f * predict +        
-            0.55f * sparsity +       
-            0.20f * structure +      
-            0.20f * inter_scale +    
+            0.35f * predict +
+            0.55f * sparsity +
+            0.20f * structure +
+            0.20f * inter_scale +
             transient;
 
         p_val *= freq_weight[i];
-        p_val = std::tanh(1.3f * p_val);
+
+        p_val =
+            std::tanh(1.3f * p_val);
 
         priority[i] = p_val;
     }
@@ -169,21 +217,27 @@ inline std::vector<float> compute_channel_priority(
 
     for (int i = 0; i < band_count; ++i) {
         priority[i] =
-            0.70f * priority[i] +            
-             0.30f * prev_priority[i];
+            0.70f * priority[i] +
+            0.30f * prev_priority[i];
     }
+
     prev_priority = priority;
     prev_coeffs = coeffs;
 
     float sum = 0.0f;
+
     for (float v : priority)
         sum += v;
 
     if (sum < eps) {
-        std::fill(priority.begin(), priority.end(), 1.0f / band_count);
+        std::fill(
+            priority.begin(),
+            priority.end(),
+            1.0f / band_count
+        );
+
         return priority;
     }
 
     return priority;
 }
-

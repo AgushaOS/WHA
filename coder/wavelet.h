@@ -128,51 +128,81 @@ private:
         float s = std::sqrt(x);
         return s * std::sqrt(s);
     }
+
     std::vector<int> gray_permutation(int level) const {
-        int n = 1 << level;
+        const int n = 1 << level;
         std::vector<int> perm(n);
+
         for (int i = 0; i < n; ++i)
             perm[i] = i ^ (i >> 1);
+
         return perm;
     }
+
 public:
-    std::vector<std::vector<float>> wpt(const std::vector<float>& signal,
-                                        int levels,
-                                        float bitrate,
-                                        int sr,
-                                        int channels) {
+    std::vector<std::vector<float>> wpt(
+        const std::vector<float>& signal,
+        int levels,
+        float bitrate,
+        int sr,
+        int channels)
+    {
         std::vector<float> data = signal;
+
         wpt_decompose(data, levels);
+
         const size_t N = data.size();
         const int total_bands = 1 << levels;
         const size_t band_size = N >> levels;
 
         if (levels > 1) {
-            auto perm = gray_permutation(levels);
+            const auto perm = gray_permutation(levels);
+
             std::vector<float> ordered(N);
+
             for (int i = 0; i < total_bands; ++i) {
-                const size_t src = i * band_size;
-                const size_t dst = perm[i] * band_size;
-                std::copy(data.begin() + src,
-                          data.begin() + src + band_size,
-                          ordered.begin() + dst);
+                const size_t src = static_cast<size_t>(perm[i]) * band_size;
+                const size_t dst = static_cast<size_t>(i) * band_size;
+
+                std::copy(
+                    data.begin() + src,
+                    data.begin() + src + band_size,
+                    ordered.begin() + dst
+                );
             }
+
             data.swap(ordered);
         }
 
         if (sr >= 44100) {
-            int atten_start = total_bands * 3 / 4;
+            {
+                const int atten_start = total_bands * 7 / 8;
+
             for (int i = atten_start; i < total_bands; ++i) {
                 float* begin = data.data() + i * band_size;
-                float* end = begin + band_size;
+                float* end   = begin + band_size;
+
+                for (float* p = begin; p != end; ++p)
+                    *p *= 0.0f;
+            }
+            }
+            const int atten_start = total_bands * 3 / 4;
+
+            for (int i = atten_start; i < total_bands; ++i) {
+                float* begin = data.data() + i * band_size;
+                float* end   = begin + band_size;
+
                 for (float* p = begin; p != end; ++p)
                     *p *= 0.125f;
             }
 
-            if (32 <= bitrate / float(channels) && bitrate / float(channels) < 64) {
+            if (32 <= bitrate / float(channels) &&
+                bitrate / float(channels) < 64)
+            {
                 for (int i = atten_start; i < total_bands; ++i) {
                     float* begin = data.data() + i * band_size;
-                    float* end = begin + band_size;
+                    float* end   = begin + band_size;
+
                     for (float* p = begin; p != end; ++p)
                         *p *= 0.125f;
                 }
@@ -180,13 +210,16 @@ public:
         }
 
         std::vector<std::vector<float>> tree(total_bands);
+
         for (int i = 0; i < total_bands; ++i) {
-            tree[i].assign(data.begin() + i * band_size,
-                           data.begin() + (i + 1) * band_size);
+            tree[i].assign(
+                data.begin() + i * band_size,
+                data.begin() + (i + 1) * band_size
+            );
         }
+
         return tree;
     }
 };
-
 
 #endif // WAVELET_H

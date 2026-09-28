@@ -140,72 +140,95 @@ private:
     }
 
     std::vector<int> gray_permutation(int level) const {
-        int n = 1 << level;
+        const int n = 1 << level;
         std::vector<int> perm(n);
+
         for (int i = 0; i < n; ++i)
             perm[i] = i ^ (i >> 1);
+
         return perm;
     }
 
-    void apply_temporal_dither(std::vector<float>& pcm, float kbps_per_channel) const {
-        if (kbps_per_channel > 96.0f) return;
-        
-        const float AMPLITUDE = 3e-5f;  
-        
+    void apply_temporal_dither(
+        std::vector<float>& pcm,
+        float kbps_per_channel) const
+    {
+        if (kbps_per_channel > 96.0f)
+            return;
+
+        const float AMPLITUDE = 3e-5f;
+
         uint32_t seed = (uint32_t)bi * 1000000u + 1u;
-        
+
         for (size_t i = 0; i < pcm.size(); ++i) {
             seed = seed * 1664525u + 1013904223u;
-            float rand1 = static_cast<float>(seed) / 4294967296.0f;  
-            
+            float rand1 =
+                static_cast<float>(seed) / 4294967296.0f;
+
             seed = seed * 1664525u + 1013904223u;
-            float rand2 = static_cast<float>(seed) / 4294967296.0f;  
-            
-            float dither = (rand1 + rand2 - 1.0f) * AMPLITUDE;
-            
+            float rand2 =
+                static_cast<float>(seed) / 4294967296.0f;
+
+            float dither =
+                (rand1 + rand2 - 1.0f) * AMPLITUDE;
+
             pcm[i] += dither;
         }
     }
 
 public:
-    std::vector<float> iwpt(std::vector<std::vector<float>>& subbands,
-                            float sr,
-                            int levels,
-                            float target_kbps,
-                            float channels) {  
+    std::vector<float> iwpt(
+        std::vector<std::vector<float>>& subbands,
+        float sr,
+        int levels,
+        float target_kbps,
+        float channels)
+    {
         const int total_bands = 1 << levels;
 
         bi++;
 
         if (sr >= 44100) {
-            int atten_start = total_bands * 3 / 4;
-            for (size_t i = atten_start; i < subbands.size(); ++i)
-                for (float& x : subbands[i]) x *= 8.0f;
+            const int atten_start = total_bands * 3 / 4;
+
+            for (int i = atten_start; i < total_bands; ++i)
+                for (float& x : subbands[i])
+                    x *= 8.0f;
 
             if (32 <= target_kbps / float(channels) &&
-                target_kbps / float(channels) < 64) {
-                for (size_t i = atten_start; i < subbands.size(); ++i)
-                    for (float& x : subbands[i]) x *= 8.0f;
+                target_kbps / float(channels) < 64)
+            {
+                for (int i = atten_start; i < total_bands; ++i)
+                    for (float& x : subbands[i])
+                        x *= 8.0f;
             }
         }
 
-
         if (levels > 1) {
-            auto perm = gray_permutation(levels);
+            const auto perm = gray_permutation(levels);
+
             std::vector<std::vector<float>> reordered(total_bands);
-            for (int i = 0; i < total_bands; ++i)
-                reordered[i] = std::move(subbands[perm[i]]);
+
+            for (int i = 0; i < total_bands; ++i) {
+                reordered[perm[i]] = std::move(subbands[i]);
+            }
+
             subbands = std::move(reordered);
         }
 
-        std::vector<float> pcm = wpt_reconstruct(subbands, levels);
-        
-        float kbps_per_channel = target_kbps / float(channels);
-        apply_temporal_dither(pcm, kbps_per_channel);
+        std::vector<float> pcm =
+            wpt_reconstruct(subbands, levels);
+
+        const float kbps_per_channel =
+            target_kbps / float(channels);
+
+        apply_temporal_dither(
+            pcm,
+            kbps_per_channel
+        );
 
         return pcm;
     }
 };
-
 
 #endif // WAVELET_H
