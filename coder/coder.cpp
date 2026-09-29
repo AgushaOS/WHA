@@ -12,7 +12,6 @@
 #include <cstring>
 #include <array>
 #include <tuple>
-
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 #include "wavelet.h"
@@ -21,16 +20,13 @@
 #include "joint_stereo.h"
 #include "quantize.h"
 #include "entropy_encoder.h"
-
 #include "settings.h"
 #include "pred_state.h"
 #include "codec_utils.h"
 #include "transient.h"
 #include "energy_shape.h"
 #include "sbr_encode.h"
-
-#include "pow_filter.h"     
-
+#include "pow_filter.h"
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -117,19 +113,16 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
 
     bool use_is = (stereo && target_kbps < 510.0f);
-
     std::vector<uint8_t> mode_ms(band_count, 0);
     std::vector<uint8_t> is_band(band_count, 0);
     std::vector<std::vector<float>> ch0_bands(band_count);
     std::vector<std::vector<float>> ch1_bands(band_count);
     std::vector<std::vector<float>> ch0_original(band_count);
-
     for (int i = 0; i < band_count; ++i)
         ch0_original[i] = left_coeffs[i];
 
     int is_start_default = band_count;
     int is_start_max     = band_count;
-
     std::vector<std::array<float, 4>> is_r_vals(band_count);
     for (auto& a : is_r_vals) a.fill(0.5f);
     std::vector<bool> is_inv_flags(band_count, false);
@@ -150,6 +143,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             SETTINGS.enable_adaptive_is &&
             (SETTINGS.adaptive_is_base_override != 0) &&
             (in_range || SETTINGS.adaptive_is_base_override > 0);
+
         if (allow_adaptive) {
             int base_max = get_adaptive_is_max_base(target_kbps, SETTINGS);
             is_start_max = get_is_start_from_base(base_max, total_bands);
@@ -172,17 +166,20 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 ch1_bands[i] = right_band;
                 continue;
             }
+
             float El = 0.0f, Er = 0.0f;
             for (int j = 0; j < n; ++j) {
                 El += left_band[j]  * left_band[j];
                 Er += right_band[j] * right_band[j];
             }
+
             auto [mid, side] = mid_side(left_band, right_band);
             float Em = 0.0f, Es = 0.0f;
             for (int j = 0; j < n; ++j) {
                 Em += mid[j]  * mid[j];
                 Es += side[j] * side[j];
             }
+
             bool use_ms = use_mid_side(El, Er, Em, Es, enable_ms, target_kbps);
             if (use_ms) {
                 mode_ms[i]  = 1;
@@ -194,13 +191,15 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 ch1_bands[i] = right_band;
             }
         }
+
         if (use_is) {
             BandEnergy be = compute_band_energy(ch0_bands, ch1_bands, is_band, stereo, band_count);
-
             int is_seg_threshold = 6 * total_bands / 16;
+
             for (int i = is_start_default; i < band_count; ++i) {
                 bool force_is  = !adaptive_is || (i >= is_start_max);
                 bool choose_is = force_is;
+
                 if (!force_is) {
                     choose_is = should_use_is_band(
                         left_coeffs[i], right_coeffs[i],
@@ -209,17 +208,21 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                         SETTINGS.is_equal_ratio_threshold,
                         SETTINGS.is_equal_ratio_threshold_low_bitrate);
                 }
+
                 if (choose_is) {
                     is_band[i] = 1;
                     mode_ms[i] = 1;
+
                     std::array<float, 4> r_arr;
                     bool inv_flag = false;
                     bool use_segmented = false;
                     std::vector<float> Y;
+
                     compute_is_parameters_ex(left_coeffs[i], right_coeffs[i],
-                                            Y, r_arr,
-                                            inv_flag, use_segmented,
-                                            i, total_bands);
+                                             Y, r_arr,
+                                             inv_flag, use_segmented,
+                                             i, total_bands);
+
                     is_r_vals[i]       = r_arr;
                     is_inv_flags[i]    = inv_flag;
                     is_use_segmented[i] = (i < is_seg_threshold);
@@ -259,19 +262,21 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     static std::vector<std::vector<float>> prev_ch0, prev_ch1;
     std::vector<float> priority0, priority1;
+
     if (stereo) {
         priority0 = compute_channel_priority(ch0_bands, prev_ch0, coeff_counts,
-                                            target_kbps, sr, level, false);
+                                             target_kbps, sr, level, false);
         priority1 = compute_channel_priority(ch1_bands, prev_ch1, coeff_counts,
-                                            target_kbps, sr, level, true);
+                                             target_kbps, sr, level, true);
     } else {
         priority0 = compute_channel_priority(ch0_bands, prev_ch0, coeff_counts,
-                                            target_kbps, sr, level, false);
+                                             target_kbps, sr, level, false);
         priority1.assign(band_count, 0.0f);
     }
 
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
+
     if (use_is) {
         for (int i = 0; i < band_count; ++i) {
             if (is_band[i]) {
@@ -360,6 +365,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             uint32_t idx = get_scale_idx(step, sb);
             full_scale0[i] = idx;
             scale_raw0.push_back(idx);
+
             if (can_state_pred) {
                 uint32_t val = idx;
                 if (i < (int)pred_state.prev_active0.size() &&
@@ -377,6 +383,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             uint32_t idx = get_scale_idx(step, sb);
             full_scale1[i] = idx;
             scale_raw1.push_back(idx);
+
             if (can_state_pred) {
                 uint32_t val = idx;
                 if (i < (int)pred_state.prev_active1.size() &&
@@ -439,6 +446,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         payload_writer.write_bits(k_sub, 3);
         rice_encode(payload_writer, uvals, k_sub);
     }
+
     if (stereo) {
         for (int i = 0; i < band_count; ++i) {
             if (!active1[i] || bits1[i] <= 0) continue;
@@ -453,7 +461,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     }
     payload_writer.flush();
     auto payload = payload_writer.data();
-
     uint16_t payload_len = (uint16_t)payload.size();
     header.push_back(payload_len & 0xFF);
     header.push_back((payload_len >> 8) & 0xFF);
@@ -497,17 +504,14 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         std::vector<int> sbr_indices;
         for (int i = 0; i < sbr_end; ++i)
             if (!active0[i]) sbr_indices.push_back(i);
-
         sbr_write(out, sbr, sbr_indices, can_state_pred, pred_state);
     }
 
     pred_state.prev_scale0 = full_scale0;
     pred_state.prev_scale1 = full_scale1;
-
     pred_state.prev_active0.assign(band_count, 0);
     for (int i = 0; i < band_count; ++i)
         if (active0[i]) pred_state.prev_active0[i] = 1;
-
     if (stereo) {
         pred_state.prev_active1.assign(band_count, 0);
         for (int i = 0; i < band_count; ++i)
@@ -525,6 +529,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             pred_state.prev_sbr_noise[i] = sbr.noise_flag[i] ? 1 : 0;
         }
     }
+
     pred_state.ready   = true;
     pred_state.last_bi = block_index;
 
@@ -536,13 +541,14 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
                               const std::string& path,
                               uint32_t sr, int num_channels,
                               float target_kbps,
+                              uint32_t total_frames, 
                               size_t write_buffer_blocks = 8192)
 {
     std::ofstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot create output file");
-
+    
     f.write("WHA1", 4);
-    uint8_t version = 20;
+    uint8_t version = 21; 
     f.write((char*)&version, 1);
     f.write((char*)&sr, 4);
     uint8_t ch = (uint8_t)num_channels;
@@ -550,8 +556,10 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
     uint32_t block_count = (uint32_t)blocks.size();
     f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 20;
+    uint8_t block_format_version = 21; 
     f.write((char*)&block_format_version, 1);
+
+    f.write((char*)&total_frames, 4);
 
     int mode_bytes = ((int)block_count + 7) / 8;
     std::vector<uint8_t> mode_packed(mode_bytes, 0);
@@ -562,6 +570,7 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
 
     std::vector<uint8_t> write_buffer;
     write_buffer.reserve(write_buffer_blocks * 4096);
+
     auto flush_buffer = [&]() {
         if (!write_buffer.empty()) {
             f.write((char*)write_buffer.data(), write_buffer.size());
@@ -582,7 +591,7 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
 
     int long_blocks  = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v20 to " << path << " ("
+    std::cout << "Saved container v21 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short)" << std::endl;
@@ -597,6 +606,7 @@ compress_audio_streaming(const std::string& input_path,
     drwav wav;
     if (!drwav_init_file(&wav, input_path.c_str(), nullptr))
         throw std::runtime_error("Cannot open WAV file");
+
     sr       = wav.sampleRate;
     channels = wav.channels;
     uint64_t total_frames = wav.totalPCMFrameCount;
@@ -621,7 +631,6 @@ compress_audio_streaming(const std::string& input_path,
 
     std::vector<float> audio_buffer;
     size_t buffer_start = 0;
-
     bool eof          = false;
     bool pow_flushed  = false;
 
@@ -637,20 +646,22 @@ compress_audio_streaming(const std::string& input_path,
                 }
                 break;
             }
+
             size_t samples_to_read = read_buffer_size_samples * num_channels;
             std::vector<float> chunk(samples_to_read);
             drwav_uint64 frames_read =
                 drwav_read_pcm_frames_f32(&wav, read_buffer_size_samples, chunk.data());
+
             if (frames_read == 0) {
                 eof = true;
                 continue;
             }
+
             chunk.resize(frames_read * num_channels);
             std::vector<float> processed;
             processed.reserve(chunk.size());
             pow_enc.process(chunk.data(), (size_t)frames_read, processed);
             audio_buffer.insert(audio_buffer.end(), processed.begin(), processed.end());
-            // pow_enc.printProfile();
         }
     };
 
@@ -659,11 +670,13 @@ compress_audio_streaming(const std::string& input_path,
     while (current_pos < (int)total_frames) {
         int analyze_len = std::min(2048, (int)total_frames - current_pos);
         ensure_data_available(current_pos + analyze_len);
+
         if ((int)(buffer_start + audio_buffer.size() / num_channels) <= current_pos)
             break;
 
         std::vector<float> analyze_buf(analyze_len * num_channels);
         size_t offset = (current_pos - (int)buffer_start) * num_channels;
+
         if (offset + analyze_buf.size() <= audio_buffer.size()) {
             std::copy(audio_buffer.begin() + offset,
                       audio_buffer.begin() + offset + analyze_buf.size(),
@@ -704,6 +717,7 @@ compress_audio_streaming(const std::string& input_path,
         std::vector<float> block(block_size * num_channels, 0.0f);
         size_t offset_block = (current_pos - (int)buffer_start) * num_channels;
         size_t avail_block  = audio_buffer.size() - offset_block;
+
         if (avail_block > 0) {
             size_t copy_samples = std::min(avail_block, block.size());
             std::copy(audio_buffer.begin() + offset_block,
@@ -724,6 +738,7 @@ compress_audio_streaming(const std::string& input_path,
                 window[block_size - 1 - i] = t * t * (3.0f - 2.0f * t);
             }
         }
+
         for (int c = 0; c < num_channels; ++c)
             for (int i = 0; i < block_size; ++i)
                 block[i * num_channels + c] *= window[i];
@@ -737,6 +752,7 @@ compress_audio_streaming(const std::string& input_path,
             effective_budget = target_bits + max_reservoir;
 
         uint32_t block_index = (uint32_t)blocks_raw.size();
+
         auto comp = compress_block_adaptive_joint(
             block, wpt, num_channels, level,
             effective_budget, target_kbps, sr, block_size,
@@ -769,6 +785,7 @@ compress_audio_streaming(const std::string& input_path,
                                audio_buffer.begin() + remove_samples);
             buffer_start = keep_start;
         }
+
         ensure_data_available(current_pos + 2048);
     }
 
@@ -838,8 +855,9 @@ int main(int argc, char** argv) {
     auto block_modes   = std::get<5>(comp);
 
     int block_count = (int)blocks.size();
+
     save_compressed_buffered(blocks, block_modes, out_container,
-                             sr, num_channels, tk, read_buffer);
+                             sr, num_channels, tk, total_samples, read_buffer);
 
     getrusage(RUSAGE_SELF, &usage_after);
     double user_time_sec =
