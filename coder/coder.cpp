@@ -273,7 +273,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                                              target_kbps, sr, level, false);
         priority1.assign(band_count, 0.0f);
     }
-
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
 
@@ -328,11 +327,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<uint8_t> mode_bytes_vec((band_count + 7) / 8, 0);
     for (int i = 0; i < band_count; ++i)
         if (mode_ms[i]) mode_bytes_vec[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask0(mask_bytes, 0);
     for (int i = 0; i < band_count; ++i)
         if (active0[i]) mask0[i / 8] |= (1 << (i % 8));
-
     std::vector<uint8_t> mask1;
     if (stereo) {
         mask1.assign(mask_bytes, 0);
@@ -763,7 +760,6 @@ compress_audio_streaming(const std::string& input_path,
         reservoir += target_bits - real_bits;
         if (reservoir < 0) reservoir = 0;
         if (reservoir > max_reservoir) reservoir = max_reservoir;
-
         blocks_raw.push_back(comp);
         block_modes.push_back(!is_transient);
 
@@ -855,6 +851,36 @@ int main(int argc, char** argv) {
     auto block_modes   = std::get<5>(comp);
 
     int block_count = (int)blocks.size();
+    save_compressed_buffered(blocks, block_modes, out_container,
+                             sr, num_channels, tk, read_buffer);
+
+    getrusage(RUSAGE_SELF, &usage_after);
+    double user_time_sec =
+        (usage_after.ru_utime.tv_sec  - usage_before.ru_utime.tv_sec) +
+        (usage_after.ru_utime.tv_usec - usage_before.ru_utime.tv_usec) / 1000000.0;
+
+    double audio_duration_sec =
+        (total_samples > 0) ? (double)total_samples / (double)sr : 0.0;
+
+    size_t total_file_bytes = 22;
+    for (const auto& blk : blocks)
+        total_file_bytes += 4 + blk.size();
+
+    double actual_bitrate_kbps =
+        (audio_duration_sec > 0.0)
+            ? (double)total_file_bytes * 8.0 / 1000.0 / audio_duration_sec
+            : 0.0;
+
+    double realtime_speed =
+        (user_time_sec > 0.0) ? (audio_duration_sec / user_time_sec) : 0.0;
+
+    std::cout << "Compressed: " << block_count
+              << " blocks, user time=" << user_time_sec << "s" << std::endl;
+    std::cout << "Audio duration: " << audio_duration_sec << " s" << std::endl;
+    std::cout << "File size: " << total_file_bytes << " bytes" << std::endl;
+    std::cout << "Target bitrate: " << target_kbps << " kbps" << std::endl;
+    std::cout << "Actual bitrate: " << actual_bitrate_kbps << " kbps" << std::endl;
+    std::cout << "Encoding speed: " << realtime_speed << "x realtime" << std::endl;
 
     save_compressed_buffered(blocks, block_modes, out_container,
                              sr, num_channels, tk, total_samples, read_buffer);

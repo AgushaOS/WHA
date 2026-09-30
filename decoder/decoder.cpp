@@ -175,7 +175,7 @@ void decompress_wha_to_wav(const std::string& in_wha,
         std::vector<uint8_t> blk(block_len);
         f.read((char*)blk.data(), block_len);
         if ((size_t)f.gcount() < block_len) throw std::runtime_error("Block truncated");
-
+        
         size_t ptr = 0;
         auto need = [&](size_t n) { if (ptr + n > blk.size()) throw std::runtime_error("Block truncated"); };
 
@@ -347,6 +347,18 @@ void decompress_wha_to_wav(const std::string& in_wha,
                 quant1[i].resize(uvals.size());
                 for (size_t j = 0; j < uvals.size(); ++j) quant1[i][j] = zigzag_decode(uvals[j]);
             }
+        };
+        
+        decode_scales(steps0, active0, k_scale0, pred_state.prev_scale0, pred_state.prev_active0);
+        if (stereo) decode_scales(steps1, active1, k_scale1, pred_state.prev_scale1, pred_state.prev_active1);
+        
+        quant0.resize(expected_band_count);
+        for (int i = 0; i < expected_band_count; ++i) {
+            if (!active0[i]) continue;
+            int k_sub = (int)payload_reader.read_bits(3);
+            auto uvals = rice_decode(payload_reader, band_shapes[i], k_sub);
+            quant0[i].resize(uvals.size());
+            for (size_t j = 0; j < uvals.size(); ++j) quant0[i][j] = zigzag_decode(uvals[j]);
         }
 
         ch0_bands.resize(expected_band_count);
@@ -458,6 +470,8 @@ void decompress_wha_to_wav(const std::string& in_wha,
               << ", ch=" << (int)num_channels << ")" << std::endl;
 }
 
+#include <sys/resource.h>
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: decoder <input.wha> <output.wav> [buffer_size_in_samples]" << std::endl;
@@ -503,4 +517,5 @@ int main(int argc, char** argv) {
     }
 
     return 0;
-}
+} // DECODER
+
