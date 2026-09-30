@@ -41,7 +41,11 @@ inline SBREncodeResult sbr_analyze(
         float rms   = std::sqrt(static_cast<float>(sum_sq / orig.size()) + eps);
         float crest = max_abs / (rms + eps);
 
-        result.noise_flag[i] = (crest < 2.5f);
+        // if (i >= band_count / 2) {
+        //     std::cout << crest << '\n';
+        // }
+
+        result.noise_flag[i] = (crest < 3.5f);
         int sb = get_scale_bits(i);
         result.rms_idx[i] = get_scale_idx(rms, sb);
     }

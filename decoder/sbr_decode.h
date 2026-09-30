@@ -150,55 +150,122 @@ inline SBRDecodeResult sbr_decode(const uint8_t* blk, size_t& ptr, size_t blk_si
     return result;
 }
 
-inline void sbr_synthesize(std::vector<std::vector<float>>& ch0_bands,
-                           const std::vector<uint8_t>&      active0,
-                           const std::vector<int>&          band_shapes,
-                           const SBRDecodeResult&           sbr,
-                           int                              sbr_end,
-                           uint32_t                         block_idx)
+inline void sbr_synthesize(
+    std::vector<std::vector<float>>& ch0_bands,
+    const std::vector<uint8_t>&      active0,
+    const std::vector<int>&          band_shapes,
+    const SBRDecodeResult&           sbr,
+    int                              sbr_end,
+    uint32_t                         block_idx)
 {
-    if (!sbr.used) return;
+    if (!sbr.used)
+        return;
+
+    const int band_count = (int)ch0_bands.size();
+
+    std::vector<int> old_index(band_count);
+
+    for (int i = 0; i < band_count; ++i)
+        old_index[i] = i ^ (i >> 1);
 
     std::vector<int> available_sources;
-    for (int j = 0; j < (int)ch0_bands.size(); ++j) {
+
+    for (int j = 0; j < band_count; ++j) {
         if (active0[j])
             available_sources.push_back(j);
     }
 
-    std::vector<bool> source_used(ch0_bands.size(), false);
+    std::vector<bool> source_used(
+        band_count,
+        false
+    );
 
     for (int i = 0; i < sbr_end; ++i) {
-        if (active0[i]) continue;
 
-        int   N             = band_shapes[i];
-        float target_rms    = sbr.rms[i];
-        float target_energy = target_rms * target_rms * N;
+        if (active0[i])
+            continue;
+
+        const int N = band_shapes[i];
+
+        const float target_rms =
+            sbr.rms[i];
+
+        const float target_energy =
+            target_rms * target_rms * N;
 
         ch0_bands[i].resize(N);
 
         if (sbr.noise_flag[i]) {
-            uint32_t seed = block_idx * 1000000u + (uint32_t)i * 137u + 1u;
+
+            uint32_t seed =
+                block_idx * 1000000u +
+                (uint32_t)i * 137u +
+                1u;
+
             float noise_energy = 0.0f;
+
             for (int j = 0; j < N; ++j) {
-                seed = seed * 1664525u + 1013904223u;
-                float noise = (static_cast<float>(seed) / 2147483648.0f) - 1.0f;
+
+                seed =
+                    seed * 1664525u +
+                    1013904223u;
+
+                float noise =
+                    (static_cast<float>(seed) /
+                     2147483648.0f) - 1.0f;
+
                 ch0_bands[i][j] = noise;
-                noise_energy += noise * noise;
+
+                noise_energy +=
+                    noise * noise;
             }
-            float gain = std::sqrt(target_energy / (noise_energy + 1e-12f));
+
+            const float gain =
+                std::sqrt(
+                    target_energy /
+                    (noise_energy + 1e-12f)
+                );
+
             for (int j = 0; j < N; ++j)
                 ch0_bands[i][j] *= gain;
-        } else {
-            int   source_band = -1;
+        }
+
+        else {
+
+            int source_band = -1;
             float best_weight = -1.0f;
-            const int   IDEAL_DISTANCE = 2;
-            const float SIGMA          = 3.0f;
+
+            const int IDEAL_DISTANCE = 2;
+            const float SIGMA = 3.0f;
+
+            const int target_old =
+                old_index[i];
 
             for (int src : available_sources) {
-                if (source_used[src]) continue;
-                int   distance = std::abs(src - i);
-                float d        = (float)(distance - IDEAL_DISTANCE);
-                float weight   = std::exp(-(d * d) / (2.0f * SIGMA * SIGMA));
+
+                if (source_used[src])
+                    continue;
+
+                const int source_old =
+                    old_index[src];
+
+                const int distance =
+                    std::abs(
+                        source_old - target_old
+                    );
+
+                const float d =
+                    (float)(distance -
+                            IDEAL_DISTANCE);
+
+                const float weight =
+                    std::exp(
+                        -(d * d) /
+                        (2.0f *
+                         SIGMA *
+                         SIGMA)
+                    );
+
                 if (weight > best_weight) {
                     best_weight = weight;
                     source_band = src;
@@ -206,17 +273,39 @@ inline void sbr_synthesize(std::vector<std::vector<float>>& ch0_bands,
             }
 
             if (source_band >= 0) {
+
                 source_used[source_band] = true;
-                const auto& src      = ch0_bands[source_band];
-                int         src_size = (int)src.size();
-                float       src_energy = 0.0f;
-                for (float v : src) src_energy += v * v;
-                float gain = std::sqrt(target_energy / (src_energy + 1e-12f));
+
+                const auto& src =
+                    ch0_bands[source_band];
+
+                const int src_size =
+                    (int)src.size();
+
+                float src_energy = 0.0f;
+
+                for (float v : src)
+                    src_energy += v * v;
+
+                const float gain =
+                    std::sqrt(
+                        target_energy /
+                        (src_energy + 1e-12f)
+                    );
+
                 for (int j = 0; j < N; ++j)
-                    ch0_bands[i][j] = src[j % src_size] * gain;
-            } else {
-                std::fill(ch0_bands[i].begin(), ch0_bands[i].end(), 0.0f);
+                    ch0_bands[i][j] =
+                        src[j % src_size] * gain;
+            }
+
+            else {
+                std::fill(
+                    ch0_bands[i].begin(),
+                    ch0_bands[i].end(),
+                    0.0f
+                );
             }
         }
     }
 }
+

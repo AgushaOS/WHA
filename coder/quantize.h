@@ -237,6 +237,14 @@ inline QuantResult quantize_levels(
         quantized_per_level[l] = std::move(quantized);
     }
 
+    // for (auto x : quantized_per_level) {
+    //     for (auto y : x) {
+    //         std::cout << y << ' ';
+    //     }
+    //     std::cout << " | ";
+    // }
+    // std::cout << '\n';
+
     return { std::move(scales), std::move(quantized_per_level) };
 }
 
