@@ -293,7 +293,7 @@ inline bool use_mid_side(float El, float Er, float Em, float Es,
 
     const float eps = 1e-12f;
 
-    if (target_kbps < 128.0f) {
+    if (target_kbps < 64.0f) {
         if (Es > Em * 0.9f)
             return false;
 

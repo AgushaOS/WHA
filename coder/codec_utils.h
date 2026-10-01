@@ -6,6 +6,7 @@
 #include <climits>
 
 inline int get_scale_bits(int band_idx) {
+    return 8;
     if (band_idx < 1) return 12;
     return 8;
 }
