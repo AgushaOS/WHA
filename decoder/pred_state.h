@@ -8,6 +8,9 @@ struct ModeState {
     bool     ready  = false;
     uint32_t last_bi = 0;
 
+    std::vector<uint8_t> prev_k_sub0;
+    std::vector<uint8_t> prev_k_sub1;
+
     std::vector<uint32_t> prev_scale0;
     std::vector<uint32_t> prev_scale1;
     std::vector<uint8_t>  prev_active0;

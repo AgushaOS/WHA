@@ -40,7 +40,6 @@ static int get_adaptive_is_max_base(float target_kbps, const EncoderSettings& s)
     if (target_kbps < s.adaptive_is_kbps_min ||
         target_kbps > s.adaptive_is_kbps_max)
         return base_default;
-
     float k0, k1;
     int   b0, b1;
     if (target_kbps <= 64.0f) {
@@ -76,10 +75,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 {
     const float eps     = 1e-12f;
     const bool  stereo  = (num_channels == 2);
-
     std::vector<std::vector<float>> left_coeffs, right_coeffs;
     std::vector<int> coeff_counts;
-
     if (stereo) {
         size_t spc = block.size() / 2;
         std::vector<float> left(spc), right(spc);
@@ -104,7 +101,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     ModeState& pred_state = (level == 5) ? pred_ctx.long_state : pred_ctx.short_state;
     pred_state.ensure(band_count);
-
     bool can_state_pred = false;
     if (pred_state.ready && block_index > pred_state.last_bi) {
         uint32_t age = block_index - pred_state.last_bi;
@@ -143,7 +139,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             SETTINGS.enable_adaptive_is &&
             (SETTINGS.adaptive_is_base_override != 0) &&
             (in_range || SETTINGS.adaptive_is_base_override > 0);
-
         if (allow_adaptive) {
             int base_max = get_adaptive_is_max_base(target_kbps, SETTINGS);
             is_start_max = get_is_start_from_base(base_max, total_bands);
@@ -166,20 +161,17 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 ch1_bands[i] = right_band;
                 continue;
             }
-
             float El = 0.0f, Er = 0.0f;
             for (int j = 0; j < n; ++j) {
                 El += left_band[j]  * left_band[j];
                 Er += right_band[j] * right_band[j];
             }
-
             auto [mid, side] = mid_side(left_band, right_band);
             float Em = 0.0f, Es = 0.0f;
             for (int j = 0; j < n; ++j) {
                 Em += mid[j]  * mid[j];
                 Es += side[j] * side[j];
             }
-
             bool use_ms = use_mid_side(El, Er, Em, Es, enable_ms, target_kbps);
             if (use_ms) {
                 mode_ms[i]  = 1;
@@ -191,15 +183,12 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 ch1_bands[i] = right_band;
             }
         }
-
         if (use_is) {
             BandEnergy be = compute_band_energy(ch0_bands, ch1_bands, is_band, stereo, band_count);
-            int is_seg_threshold = 6 * total_bands / 16;
-
+            int is_seg_threshold = 8 * total_bands / 16;
             for (int i = is_start_default; i < band_count; ++i) {
                 bool force_is  = !adaptive_is || (i >= is_start_max);
                 bool choose_is = force_is;
-
                 if (!force_is) {
                     choose_is = should_use_is_band(
                         left_coeffs[i], right_coeffs[i],
@@ -208,21 +197,17 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                         SETTINGS.is_equal_ratio_threshold,
                         SETTINGS.is_equal_ratio_threshold_low_bitrate);
                 }
-
                 if (choose_is) {
                     is_band[i] = 1;
                     mode_ms[i] = 1;
-
                     std::array<float, 4> r_arr;
                     bool inv_flag = false;
                     bool use_segmented = false;
                     std::vector<float> Y;
-
                     compute_is_parameters_ex(left_coeffs[i], right_coeffs[i],
                                              Y, r_arr,
                                              inv_flag, use_segmented,
                                              i, total_bands);
-
                     is_r_vals[i]       = r_arr;
                     is_inv_flags[i]    = inv_flag;
                     is_use_segmented[i] = (i < is_seg_threshold);
@@ -249,11 +234,9 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<float> energy1 = std::move(be.e1);
 
     apply_base_pow(energy0, energy1, band_count);
-
     bool has_transient = detect_strong_transient(
         energy0, energy1, band_count, stereo,
         SETTINGS.transient_ratio_threshold);
-
     apply_adaptive_pow(energy0, energy1, band_count, stereo,
                        target_kbps, has_transient);
     apply_narrowband_correction(energy0, energy1, band_count, stereo);
@@ -262,7 +245,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     static std::vector<std::vector<float>> prev_ch0, prev_ch1;
     std::vector<float> priority0, priority1;
-
     if (stereo) {
         priority0 = compute_channel_priority(ch0_bands, prev_ch0, coeff_counts,
                                              target_kbps, sr, level, false);
@@ -276,7 +258,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
-
     if (use_is) {
         for (int i = 0; i < band_count; ++i) {
             if (is_band[i]) {
@@ -292,21 +273,19 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     bits_header += ((band_count + 7) / 8) * 8;
     if (stereo) bits_header += ((band_count + 7) / 8) * 8;
     bits_header += 8;
-
     int header_bytes_est = (bits_header + 7) / 8 + 2;
     int payload_budget   = target_bits_budget - header_bytes_est * 8;
     if (payload_budget < 0)
         payload_budget = target_bits_budget / 2;
 
     int reservoir_max = (int)(payload_budget * SETTINGS.reservoir_max_factor);
-
     DualAllocResult alloc = allocate_bits_dual(
         priority0, priority1, coeff_counts, payload_budget,
         min_bits, max_bits, energy0, energy1,
         0, reservoir_max, target_kbps, num_channels == 2);
 
-    std::vector<int> bits0 = alloc.bits0;
-    std::vector<int> bits1 = alloc.bits1;
+    std::vector<int> bits0 = std::move(alloc.bits0);
+    std::vector<int> bits1 = std::move(alloc.bits1);
 
     std::vector<bool> active0(band_count), active1(band_count);
     for (int i = 0; i < band_count; ++i) {
@@ -324,7 +303,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     std::vector<uint8_t> header;
     int mask_bytes = (band_count + 7) / 8;
-
     std::vector<uint8_t> mode_bytes_vec((band_count + 7) / 8, 0);
     for (int i = 0; i < band_count; ++i)
         if (mode_ms[i]) mode_bytes_vec[i / 8] |= (1 << (i % 8));
@@ -345,11 +323,13 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     if (stereo)
         header.insert(header.end(), mask1.begin(), mask1.end());
 
-    std::vector<std::vector<std::vector<float>>> for_quant0 = { ch0_bands };
+    std::vector<std::vector<std::vector<float>>> for_quant0(1);
+    for_quant0[0] = std::move(ch0_bands);
     QuantResult qres0 = quantize_levels(for_quant0, bits0, target_kbps);
     QuantResult qres1;
     if (stereo) {
-        std::vector<std::vector<std::vector<float>>> for_quant1 = { ch1_bands };
+        std::vector<std::vector<std::vector<float>>> for_quant1(1);
+        for_quant1[0] = std::move(ch1_bands);
         qres1 = quantize_levels(for_quant1, bits1, target_kbps);
     }
 
@@ -365,7 +345,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             uint32_t idx = get_scale_idx(step, sb);
             full_scale0[i] = idx;
             scale_raw0.push_back(idx);
-
             if (can_state_pred) {
                 uint32_t val = idx;
                 if (i < (int)pred_state.prev_active0.size() &&
@@ -383,7 +362,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             uint32_t idx = get_scale_idx(step, sb);
             full_scale1[i] = idx;
             scale_raw1.push_back(idx);
-
             if (can_state_pred) {
                 uint32_t val = idx;
                 if (i < (int)pred_state.prev_active1.size() &&
@@ -416,9 +394,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     bool use_scale_pred = can_state_pred && (pred_scale_bits < raw_scale_bits);
     int  k_scale0 = use_scale_pred ? k_scale0_pred : k_scale0_raw;
     int  k_scale1 = use_scale_pred ? k_scale1_pred : k_scale1_raw;
-
-    auto scale_vals0 = use_scale_pred ? scale_pred0 : scale_raw0;
-    auto scale_vals1 = use_scale_pred ? scale_pred1 : scale_raw1;
+    auto scale_vals0 = use_scale_pred ? std::move(scale_pred0) : std::move(scale_raw0);
+    auto scale_vals1 = use_scale_pred ? std::move(scale_pred1) : std::move(scale_raw1);
 
     uint8_t k_scale_byte = (uint8_t)(k_scale0 & 0x07);
     if (stereo)
@@ -430,35 +407,72 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     header.push_back(k_scale_byte);
 
     BitWriterMSB payload_writer;
+
     for (uint32_t v : scale_vals0)
         rice_encode(payload_writer, std::vector<uint32_t>{v}, k_scale0);
     if (stereo)
         for (uint32_t v : scale_vals1)
             rice_encode(payload_writer, std::vector<uint32_t>{v}, k_scale1);
 
-    for (int i = 0; i < band_count; ++i) {
-        if (!active0[i] || bits0[i] <= 0) continue;
-        const auto& qvals = qres0.quantized_per_level[i];
-        std::vector<uint32_t> uvals(qvals.size());
-        for (size_t j = 0; j < qvals.size(); ++j)
-            uvals[j] = zigzag_encode(qvals[j]);
-        int k_sub = compute_optimal_rice_k(uvals);
-        payload_writer.write_bits(k_sub, 3);
-        rice_encode(payload_writer, uvals, k_sub);
-    }
+    std::vector<uint32_t> k_sub_vals0, k_sub_vals1;
+    std::vector<int> k_sub_per_band0(band_count, 0);
+    std::vector<int> k_sub_per_band1(band_count, 0);
+    std::vector<std::vector<uint32_t>> uvals0(band_count);
+    std::vector<std::vector<uint32_t>> uvals1(band_count);
 
-    if (stereo) {
-        for (int i = 0; i < band_count; ++i) {
-            if (!active1[i] || bits1[i] <= 0) continue;
-            const auto& qvals = qres1.quantized_per_level[i];
-            std::vector<uint32_t> uvals(qvals.size());
+    k_sub_vals0.reserve(band_count);
+    if (stereo) k_sub_vals1.reserve(band_count);
+
+    for (int i = 0; i < band_count; ++i) {
+        if (active0[i] && bits0[i] > 0) {
+            const auto& qvals = qres0.quantized_per_level[i];
+            auto& uv = uvals0[i];
+            uv.resize(qvals.size());
             for (size_t j = 0; j < qvals.size(); ++j)
-                uvals[j] = zigzag_encode(qvals[j]);
-            int k_sub = compute_optimal_rice_k(uvals);
-            payload_writer.write_bits(k_sub, 3);
-            rice_encode(payload_writer, uvals, k_sub);
+                uv[j] = zigzag_encode(qvals[j]);
+
+            int k_sub = compute_optimal_rice_k(uv);
+            k_sub_per_band0[i] = k_sub;
+            k_sub_vals0.push_back(k_sub);
+        }
+        if (stereo && active1[i] && bits1[i] > 0) {
+            const auto& qvals = qres1.quantized_per_level[i];
+            auto& uv = uvals1[i];
+            uv.resize(qvals.size());
+            for (size_t j = 0; j < qvals.size(); ++j)
+                uv[j] = zigzag_encode(qvals[j]);
+
+            int k_sub = compute_optimal_rice_k(uv);
+            k_sub_per_band1[i] = k_sub;
+            k_sub_vals1.push_back(k_sub);
         }
     }
+
+    int k_sub_k0 = k_sub_vals0.empty() ? 0 : std::min(compute_optimal_rice_k(k_sub_vals0), 3);
+    int k_sub_k1 = 0;
+    if (stereo && !k_sub_vals1.empty()) {
+        k_sub_k1 = std::min(compute_optimal_rice_k(k_sub_vals1), 3);
+    }
+
+    payload_writer.write_bits(k_sub_k0, 2);
+    if (stereo) payload_writer.write_bits(k_sub_k1, 2);
+
+    rice_encode(payload_writer, k_sub_vals0, k_sub_k0);
+    if (stereo) rice_encode(payload_writer, k_sub_vals1, k_sub_k1);
+
+    for (int i = 0; i < band_count; ++i) {
+        if (active0[i] && bits0[i] > 0) {
+            rice_encode(payload_writer, uvals0[i], k_sub_per_band0[i]);
+        }
+    }
+    if (stereo) {
+        for (int i = 0; i < band_count; ++i) {
+            if (active1[i] && bits1[i] > 0) {
+                rice_encode(payload_writer, uvals1[i], k_sub_per_band1[i]);
+            }
+        }
+    }
+
     payload_writer.flush();
     auto payload = payload_writer.data();
     uint16_t payload_len = (uint16_t)payload.size();
@@ -472,31 +486,36 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         std::vector<int> is_indices;
         for (int i = 0; i < band_count; ++i)
             if (is_band[i]) is_indices.push_back(i);
-
         if (!is_indices.empty()) {
-            BitWriterMSB r_writer;
+            int segmented_threshold = 8 * total_bands / 16;
+            int total_vals = 0;
+            for (int idx : is_indices) {
+                total_vals += (idx < segmented_threshold && is_use_segmented[idx]) ? 4 : 1;
+            }
+            BitWriterMSB is_writer;
+            for (int i : is_indices) {
+                is_writer.write_bits(is_inv_flags[i] ? 1 : 0, 1);
+            }
+            std::vector<uint32_t> is_zz_vals;
+            is_zz_vals.reserve(total_vals);
             for (int i : is_indices) {
                 int bits = get_r_bits(i);
                 if (is_use_segmented[i]) {
                     for (int s = 0; s < 4; ++s) {
-                        uint32_t q = quantize_r(is_r_vals[i][s], bits);
-                        r_writer.write_bits(q, bits);
+                        int32_t q = quantize_r_centered(is_r_vals[i][s], bits);
+                        is_zz_vals.push_back(zigzag_encode(q));
                     }
                 } else {
-                    uint32_t q = quantize_r(is_r_vals[i][0], bits);
-                    r_writer.write_bits(q, bits);
+                    int32_t q = quantize_r_centered(is_r_vals[i][0], bits);
+                    is_zz_vals.push_back(zigzag_encode(q));
                 }
             }
-            r_writer.flush();
-            auto r_bytes = r_writer.data();
-            out.insert(out.end(), r_bytes.begin(), r_bytes.end());
-
-            std::vector<bool> inv_bits;
-            inv_bits.reserve(is_indices.size());
-            for (int i : is_indices)
-                inv_bits.push_back(is_inv_flags[i]);
-            auto inv_mask = pack_bits(inv_bits, 0, (int)inv_bits.size());
-            out.insert(out.end(), inv_mask.begin(), inv_mask.end());
+            int k_is = compute_optimal_rice_k(is_zz_vals);
+            is_writer.write_bits(k_is & 0x07, 3);
+            rice_encode(is_writer, is_zz_vals, k_is);
+            is_writer.flush();
+            auto is_bytes = is_writer.data();
+            out.insert(out.end(), is_bytes.begin(), is_bytes.end());
         }
     }
 
@@ -529,7 +548,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             pred_state.prev_sbr_noise[i] = sbr.noise_flag[i] ? 1 : 0;
         }
     }
-
     pred_state.ready   = true;
     pred_state.last_bi = block_index;
 
@@ -541,14 +559,13 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
                               const std::string& path,
                               uint32_t sr, int num_channels,
                               float target_kbps,
-                              uint32_t total_frames, 
+                              uint32_t total_frames,
                               size_t write_buffer_blocks = 8192)
 {
     std::ofstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot create output file");
-    
     f.write("WHA1", 4);
-    uint8_t version = 21; 
+    uint8_t version = 22;
     f.write((char*)&version, 1);
     f.write((char*)&sr, 4);
     uint8_t ch = (uint8_t)num_channels;
@@ -556,9 +573,8 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
     uint32_t block_count = (uint32_t)blocks.size();
     f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 21; 
+    uint8_t block_format_version = 22;
     f.write((char*)&block_format_version, 1);
-
     f.write((char*)&total_frames, 4);
 
     int mode_bytes = ((int)block_count + 7) / 8;
@@ -570,7 +586,6 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
 
     std::vector<uint8_t> write_buffer;
     write_buffer.reserve(write_buffer_blocks * 4096);
-
     auto flush_buffer = [&]() {
         if (!write_buffer.empty()) {
             f.write((char*)write_buffer.data(), write_buffer.size());
@@ -591,7 +606,7 @@ void save_compressed_buffered(const std::vector<std::vector<uint8_t>>& blocks,
 
     int long_blocks  = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v21 to " << path << " ("
+    std::cout << "Saved container v22 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short)" << std::endl;
@@ -606,7 +621,6 @@ compress_audio_streaming(const std::string& input_path,
     drwav wav;
     if (!drwav_init_file(&wav, input_path.c_str(), nullptr))
         throw std::runtime_error("Cannot open WAV file");
-
     sr       = wav.sampleRate;
     channels = wav.channels;
     uint64_t total_frames = wav.totalPCMFrameCount;
@@ -620,7 +634,6 @@ compress_audio_streaming(const std::string& input_path,
     std::vector<std::vector<uint8_t>> blocks_raw;
     std::vector<bool>                 block_modes;
     PredContext pred_ctx;
-
     PowCodec pow_enc(num_channels, 0.85f, true, target_kbps / float(num_channels));
 
     int   current_pos     = 0;
@@ -634,49 +647,73 @@ compress_audio_streaming(const std::string& input_path,
     bool eof          = false;
     bool pow_flushed  = false;
 
+    std::vector<float> analyze_buf;
+    std::vector<float> block;
+    std::vector<float> read_chunk(read_buffer_size_samples * num_channels);
+    std::vector<float> processed_buf;
+    std::vector<float> tail_buf;
+
+    struct WindowCache {
+        std::vector<float> buf;
+        int bs = 0, lo = -1, ro = -1;
+    };
+    WindowCache win_long, win_short;
+    auto get_window = [&](int bs, int lo, int ro) -> const std::vector<float>& {
+        WindowCache& wc = (bs == 2048) ? win_long : win_short;
+        if (wc.bs != bs || wc.lo != lo || wc.ro != ro) {
+            wc.buf.assign(bs, 1.0f);
+            if (lo > 1) {
+                for (int i = 0; i < lo; ++i) {
+                    float t = (float)i / lo;
+                    wc.buf[i] = t * t * (3.0f - 2.0f * t);
+                }
+            }
+            if (ro > 1) {
+                for (int i = 0; i < ro; ++i) {
+                    float t = (float)i / ro;
+                    wc.buf[bs - 1 - i] = t * t * (3.0f - 2.0f * t);
+                }
+            }
+            wc.bs = bs; wc.lo = lo; wc.ro = ro;
+        }
+        return wc.buf;
+    };
+
     auto ensure_data_available = [&](int needed_pos) {
         while ((int)(buffer_start + audio_buffer.size() / num_channels) < needed_pos) {
             if (eof) {
                 if (!pow_flushed) {
                     pow_flushed = true;
-                    std::vector<float> tail;
-                    pow_enc.flush(tail);
-                    audio_buffer.insert(audio_buffer.end(), tail.begin(), tail.end());
-                    if (!tail.empty()) continue;
+                    tail_buf.clear();
+                    pow_enc.flush(tail_buf);
+                    audio_buffer.insert(audio_buffer.end(),
+                                        tail_buf.begin(), tail_buf.end());
+                    if (!tail_buf.empty()) continue;
                 }
                 break;
             }
-
-            size_t samples_to_read = read_buffer_size_samples * num_channels;
-            std::vector<float> chunk(samples_to_read);
             drwav_uint64 frames_read =
-                drwav_read_pcm_frames_f32(&wav, read_buffer_size_samples, chunk.data());
-
+                drwav_read_pcm_frames_f32(&wav, read_buffer_size_samples, read_chunk.data());
             if (frames_read == 0) {
                 eof = true;
                 continue;
             }
-
-            chunk.resize(frames_read * num_channels);
-            std::vector<float> processed;
-            processed.reserve(chunk.size());
-            pow_enc.process(chunk.data(), (size_t)frames_read, processed);
-            audio_buffer.insert(audio_buffer.end(), processed.begin(), processed.end());
+            processed_buf.clear();
+            pow_enc.process(read_chunk.data(), (size_t)frames_read, processed_buf);
+            audio_buffer.insert(audio_buffer.end(),
+                                processed_buf.begin(), processed_buf.end());
         }
     };
 
     ensure_data_available(2048);
-
     while (current_pos < (int)total_frames) {
         int analyze_len = std::min(2048, (int)total_frames - current_pos);
         ensure_data_available(current_pos + analyze_len);
-
         if ((int)(buffer_start + audio_buffer.size() / num_channels) <= current_pos)
             break;
 
-        std::vector<float> analyze_buf(analyze_len * num_channels);
+        analyze_buf.assign(analyze_len * num_channels, 0.0f);
         size_t offset = (current_pos - (int)buffer_start) * num_channels;
-
         if (offset + analyze_buf.size() <= audio_buffer.size()) {
             std::copy(audio_buffer.begin() + offset,
                       audio_buffer.begin() + offset + analyze_buf.size(),
@@ -686,8 +723,6 @@ compress_audio_streaming(const std::string& input_path,
             std::copy(audio_buffer.begin() + offset,
                       audio_buffer.end(),
                       analyze_buf.begin());
-            std::fill(analyze_buf.begin() + avail / num_channels,
-                      analyze_buf.end(), 0.0f);
         }
 
         bool is_transient = false;
@@ -698,13 +733,13 @@ compress_audio_streaming(const std::string& input_path,
 
         int block_size, right_overlap, level;
         if (is_transient) {
-            block_size   = 1024;
+            block_size    = 1024;
             right_overlap = (int)(48 * overlap_factor);
-            level        = 4;
+            level         = 4;
         } else {
-            block_size   = 2048;
+            block_size    = 2048;
             right_overlap = (int)(96 * overlap_factor);
-            level        = 5;
+            level         = 5;
         }
 
         int left_overlap =
@@ -713,11 +748,9 @@ compress_audio_streaming(const std::string& input_path,
         int hop = block_size - right_overlap;
 
         ensure_data_available(current_pos + block_size);
-
-        std::vector<float> block(block_size * num_channels, 0.0f);
+        block.assign(block_size * num_channels, 0.0f);
         size_t offset_block = (current_pos - (int)buffer_start) * num_channels;
         size_t avail_block  = audio_buffer.size() - offset_block;
-
         if (avail_block > 0) {
             size_t copy_samples = std::min(avail_block, block.size());
             std::copy(audio_buffer.begin() + offset_block,
@@ -725,34 +758,22 @@ compress_audio_streaming(const std::string& input_path,
                       block.begin());
         }
 
-        std::vector<float> window(block_size, 1.0f);
-        if (left_overlap > 1) {
-            for (int i = 0; i < left_overlap; ++i) {
-                float t = (float)i / left_overlap;
-                window[i] = t * t * (3.0f - 2.0f * t);
-            }
-        }
-        if (right_overlap > 1) {
-            for (int i = 0; i < right_overlap; ++i) {
-                float t = (float)i / right_overlap;
-                window[block_size - 1 - i] = t * t * (3.0f - 2.0f * t);
-            }
-        }
+        const std::vector<float>& window =
+            get_window(block_size, left_overlap, right_overlap);
 
         for (int c = 0; c < num_channels; ++c)
             for (int i = 0; i < block_size; ++i)
                 block[i * num_channels + c] *= window[i];
 
         bool block_is_full = (current_pos + block_size <= (int)total_frames);
-
         int target_bits = (int)(bits_per_sample * hop);
         if (target_bits < 256) target_bits = 256;
+
         int effective_budget = target_bits + reservoir;
         if (effective_budget > target_bits + max_reservoir)
             effective_budget = target_bits + max_reservoir;
 
         uint32_t block_index = (uint32_t)blocks_raw.size();
-
         auto comp = compress_block_adaptive_joint(
             block, wpt, num_channels, level,
             effective_budget, target_kbps, sr, block_size,
@@ -764,13 +785,13 @@ compress_audio_streaming(const std::string& input_path,
         if (reservoir < 0) reservoir = 0;
         if (reservoir > max_reservoir) reservoir = max_reservoir;
 
-        blocks_raw.push_back(comp);
+        blocks_raw.push_back(std::move(comp));
         block_modes.push_back(!is_transient);
 
         if (SETTINGS.verbose && (blocks_raw.size() % 10 == 0)) {
             std::cout << "[Block " << blocks_raw.size() << "] size=" << block_size
                       << ", mode=" << (is_transient ? "short" : "long")
-                      << ", bytes=" << comp.size()
+                      << ", bytes=" << blocks_raw.back().size()
                       << ", reservoir=" << reservoir << std::endl;
         }
 
@@ -785,16 +806,14 @@ compress_audio_streaming(const std::string& input_path,
                                audio_buffer.begin() + remove_samples);
             buffer_start = keep_start;
         }
-
         ensure_data_available(current_pos + 2048);
     }
-
     drwav_uninit(&wav);
-    return {blocks_raw, sr, num_channels, target_kbps, (uint32_t)total_frames, block_modes};
+    return {std::move(blocks_raw), sr, num_channels, target_kbps,
+            (uint32_t)total_frames, std::move(block_modes)};
 }
 
 #include <sys/resource.h>
-
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: ./encoder <input.wav> [bitrate_kbps] "
@@ -802,7 +821,6 @@ int main(int argc, char** argv) {
                      "  is_max_base: -1 auto, 0 disable adaptive IS, >0 fixed max base\n";
         return 1;
     }
-
     std::string input_file = argv[1];
     std::string out_container = input_file;
     for (int64_t i = 0; i < 3; i++)
@@ -845,7 +863,6 @@ int main(int argc, char** argv) {
 
     struct rusage usage_before, usage_after;
     getrusage(RUSAGE_SELF, &usage_before);
-
     auto comp          = compress_audio_streaming(input_file, target_kbps, read_buffer);
     auto blocks        = std::get<0>(comp);
     uint32_t sr        = std::get<1>(comp);
@@ -855,7 +872,6 @@ int main(int argc, char** argv) {
     auto block_modes   = std::get<5>(comp);
 
     int block_count = (int)blocks.size();
-
     save_compressed_buffered(blocks, block_modes, out_container,
                              sr, num_channels, tk, total_samples, read_buffer);
 
@@ -863,7 +879,6 @@ int main(int argc, char** argv) {
     double user_time_sec =
         (usage_after.ru_utime.tv_sec  - usage_before.ru_utime.tv_sec) +
         (usage_after.ru_utime.tv_usec - usage_before.ru_utime.tv_usec) / 1000000.0;
-
     double audio_duration_sec =
         (total_samples > 0) ? (double)total_samples / (double)sr : 0.0;
 
@@ -873,9 +888,8 @@ int main(int argc, char** argv) {
 
     double actual_bitrate_kbps =
         (audio_duration_sec > 0.0)
-            ? (double)total_file_bytes * 8.0 / 1000.0 / audio_duration_sec
-            : 0.0;
-
+        ? (double)total_file_bytes * 8.0 / 1000.0 / audio_duration_sec
+        : 0.0;
     double realtime_speed =
         (user_time_sec > 0.0) ? (audio_duration_sec / user_time_sec) : 0.0;
 

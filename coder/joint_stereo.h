@@ -116,7 +116,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
     double corr = dot_total / (std::sqrt(eL_total * eR_total) + eps);
     inv_flag = (corr < -0.2);
 
-    int segmented_threshold = 6 * total_bands / 16;
+    int segmented_threshold = 8 * total_bands / 16;
     use_segmented = (band_idx < segmented_threshold);
 
     if (use_segmented) {
@@ -406,6 +406,29 @@ inline bool should_use_is_band(const std::vector<float>& left,
 
     return ms_benefit ||
            maxE >= minE * 4.0;
+}
+
+
+inline int32_t quantize_r_centered(float r, int bits) {
+    float r_clamped = std::clamp(r, 0.0f, 1.0f);
+    float theta = std::asin(std::sqrt(r_clamped));
+    float theta_center = (float)(M_PI * 0.25); 
+    
+    int steps = (1 << (bits - 1)) - 1; 
+    float step_size = theta_center / steps;
+    
+    int32_t q = (int32_t)std::round((theta - theta_center) / step_size);
+    return std::clamp(q, -steps, steps);
+}
+
+inline float dequantize_r_centered(int32_t q, int bits) {
+    int steps = (1 << (bits - 1)) - 1;
+    float theta_center = (float)(M_PI * 0.25);
+    float step_size = theta_center / steps;
+    
+    float theta = theta_center + q * step_size;
+    float s = std::sin(theta);
+    return s * s;
 }
 
 #endif // JOINT_STEREO_H
