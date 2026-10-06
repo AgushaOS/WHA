@@ -291,6 +291,9 @@ inline void sbr_synthesize(
             int end = (s == 3) ? N : (s + 1) * seg_size;
             float seg_target_e = target_energy * weights[s];
             float gain = std::sqrt(seg_target_e / (seg_src_energy[s] + 1e-12f));
+            if (gain > 2) {
+                gain = 0;
+            }
             for (int j = start; j < end; ++j) {
                 ch0_bands[i][j] *= gain;
             }
