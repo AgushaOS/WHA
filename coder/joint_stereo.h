@@ -17,6 +17,7 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
     size_t n = mid.size();
     left.resize(n);
     right.resize(n);
+
     for (size_t i = 0; i < n; ++i) {
         left[i]  = mid[i] + side[i];
         right[i] = mid[i] - side[i];
@@ -243,11 +244,14 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
                                                                   const std::vector<float>& right)
 {
     size_t n = left.size();
+
     std::vector<float> mid(n), side(n);
+
     for (size_t i = 0; i < n; ++i) {
         mid[i]  = (left[i] + right[i]) * 0.5f;
         side[i] = (left[i] - right[i]) * 0.5f;
     }
+
     return {mid, side};
 }
 

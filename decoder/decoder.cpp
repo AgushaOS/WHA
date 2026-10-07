@@ -39,9 +39,10 @@ void decompress_wha_to_wav(
     std::ifstream f(in_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + in_wha);
 
-    auto magic = read_n(f, 4);
-    if (magic.size() != 4 || std::string((char*)magic.data(), 4) != "WHA1")
-        throw std::runtime_error("Not a WHA container");
+    auto write_samples = [&](const std::vector<float>& samples) {
+        if (samples.empty()) return;
+        size_t frames = samples.size() / num_channels;
+        if (frames == 0) return;
 
     uint8_t version = read_u8(f);
     if (version < 18 || version > 24)
@@ -187,6 +188,16 @@ void decompress_wha_to_wav(
 
     int prev_block_size = 1024;
 
+    auto flush_write_buffer = [&]() {
+        if (write_buf.empty()) return;
+        std::vector<float> decoded;
+        decoded.reserve(write_buf.size());
+        pow_dec.process(write_buf.data(), write_buf.size() / num_channels, decoded);
+        write_samples(decoded);
+        write_buf.clear();
+    };
+
+    int prev_block_size = 1024;
     for (uint32_t bi = 0; bi < block_count; ++bi) {
         bool use_long_block = block_modes[bi];
         int level = use_long_block ? 5 : 4;
@@ -565,6 +576,18 @@ void decompress_wha_to_wav(
                     }
                 }
             }
+        };
+        
+        decode_scales(steps0, active0, k_scale0, pred_state.prev_scale0, pred_state.prev_active0);
+        if (stereo) decode_scales(steps1, active1, k_scale1, pred_state.prev_scale1, pred_state.prev_active1);
+        
+        quant0.resize(expected_band_count);
+        for (int i = 0; i < expected_band_count; ++i) {
+            if (!active0[i]) continue;
+            int k_sub = (int)payload_reader.read_bits(3);
+            auto uvals = rice_decode(payload_reader, band_shapes[i], k_sub);
+            quant0[i].resize(uvals.size());
+            for (size_t j = 0; j < uvals.size(); ++j) quant0[i][j] = zigzag_decode(uvals[j]);
         }
 
         SBRDecodeResult sbr;
@@ -751,4 +774,5 @@ int main(int argc, char** argv)
     }
 
     return 0;
-}
+} // DECODER
+
