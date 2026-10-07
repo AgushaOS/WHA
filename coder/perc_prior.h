@@ -195,24 +195,6 @@ inline std::vector<float> compute_channel_priority(
                 );
         }
 
-        float cur_peak = max_v;  
-        
-        float prev_peak = 0.0f;
-        for (float v : prev)
-            prev_peak = std::max(prev_peak, std::fabs(v));
-
-        constexpr float PEAK_THRESHOLD = 0.01f;  
-        
-        float transient = 0.0f;
-        
-        if (cur_peak > PEAK_THRESHOLD && prev_peak > PEAK_THRESHOLD) {
-            float peak_ratio = cur_peak / prev_peak;
-            
-            transient = std::log2(peak_ratio + 1.0f);
-            
-            transient = std::clamp(transient, 0.0f, 4.0f);
-        }
-
         float p_val =
             0.35f * predict +
             0.55f * sparsity +
