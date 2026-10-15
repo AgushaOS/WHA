@@ -48,7 +48,7 @@ inline DualAllocResult allocate_bits_dual(
         x = 8;
     }
     
-    // for (int i = max_bits_in.size() / 2; i < max_bits_in.size(); i++) {
+    // for (int i = max_bits_in.size() * 3 / 4; i < max_bits_in.size(); i++) {
     //     max_bits_in[i] = 0;
     // }
 

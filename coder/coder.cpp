@@ -294,7 +294,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         else active1[i] = false;
     }
 
-    int sbr_end = block_is_full ? (3 * band_count / 4) : 0;
+    int sbr_end = block_is_full ? (14 * band_count / 16) : 0;
     SBREncodeResult sbr = sbr_analyze(
         ch0_original, active0, sbr_end, band_count, SBR_W0, SBR_W1);
 
@@ -637,7 +637,7 @@ compress_audio_streaming(
 
     float target_kbps = (target_kbps_in > 0) ? target_kbps_in : SETTINGS.default_target_kbps;
     float per_channel_kbps = target_kbps / num_channels;
-    float overlap_factor = (per_channel_kbps <= 0.0f) ? 0.0f : 1.0f;
+    float overlap_factor = (per_channel_kbps <= 0.0f) ? 2.0/3.0f : 1.0f;
 
     PWPT wpt;
     std::vector<std::vector<uint8_t>> blocks_raw;
@@ -750,6 +750,7 @@ compress_audio_streaming(
             ? detect_transient_block_stereo(analyze_buf, num_channels)
             : detect_transient_block_mono(analyze_buf, num_channels);
 
+        // is_transient = false;
         int block_size, right_overlap, level;
         if (is_transient) {
             block_size = 1024;

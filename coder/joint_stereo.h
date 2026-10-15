@@ -293,7 +293,7 @@ inline bool should_use_is_band(const std::vector<float>& left,
     if (eL + eR < eps) return false;
     const double correlation = cross / (std::sqrt(eL * eR) + eps);
     const double abs_correlation = std::abs(correlation);
-    constexpr double IS_CORRELATION_THRESHOLD = 0.40;
+    constexpr double IS_CORRELATION_THRESHOLD = 0.60;
     if (abs_correlation >= IS_CORRELATION_THRESHOLD) return true;
     
     const double meanL = eL / (double)n;

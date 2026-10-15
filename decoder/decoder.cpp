@@ -72,7 +72,7 @@ void decompress_wha_to_wav(
     bool pred_enabled = (block_format_version >= 19);
 
     float per_channel_kbps = target_kbps / num_channels;
-    float overlap_factor = (per_channel_kbps <= 0.0f) ? 0.0f : 1.0f;
+    float overlap_factor = (per_channel_kbps <= 0.0f) ? 2.0/3.0f : 1.0f;
 
     int mode_bytes = (block_count + 7) / 8;
     std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
@@ -285,7 +285,7 @@ void decompress_wha_to_wav(
         bool block_is_full = (k_scale_byte & 0x80) != 0;
         bool use_scale_pred = pred_enabled && can_state_pred && ((k_scale_byte & 0x40) != 0);
 
-        int sbr_end = block_is_full ? (3 * expected_band_count / 4) : 0;
+        int sbr_end = block_is_full ? (14 * expected_band_count / 16) : 0;
 
         need(2);
         uint16_t payload_len;
