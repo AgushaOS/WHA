@@ -746,9 +746,7 @@ compress_audio_streaming(
             std::copy(audio_buffer.begin() + offset, audio_buffer.end(), analyze_buf.begin());
         }
 
-        bool is_transient = (num_channels == 2)
-            ? detect_transient_block_stereo(analyze_buf, num_channels)
-            : detect_transient_block_mono(analyze_buf, num_channels);
+        bool is_transient = detect_transient_block_stereo(analyze_buf, num_channels);
 
         // is_transient = false;
         int block_size, right_overlap, level;
