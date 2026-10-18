@@ -8,96 +8,162 @@ inline bool detect_transient_block_stereo(
     int num_channels)
 {
     static bool is_transient = false;
+
     if (num_channels <= 0)
         return is_transient;
-    const int N = (int)(block.size() / num_channels);
+
+    const int N = static_cast<int>(block.size() / num_channels);
+
     if (N < 64)
         return is_transient;
-        
-    const float* data = block.data();
-    
-    auto check_channel = [](const float* ch_data, int ch_N, bool& state) -> bool {
-        constexpr float INV_SQRT2 = 0.70710678118f;
-        float detail_energy = 0.0f;
-        float detail_max = 0.0f;
+
+    constexpr int MAX_N = 2048;
+    constexpr int MAX_LEVELS = 6;
+
+    constexpr float INV_SQRT2 = 0.70710678118f;
+    constexpr float EPSILON = 1e-12f;
+
+    constexpr float PEAK_THRESHOLD_ON = 28.0f;
+    constexpr float PEAK_THRESHOLD_OFF = 18.0f;
+
+    constexpr float BASS_DOMINANCE_THRESHOLD = 3.0f;
+
+    if (N > MAX_N)
+        return is_transient;
+
+    auto check_channel = [&](int channel, bool& state) -> bool
+    {
+        float approx[MAX_N];
+        float next[MAX_N];
+
+        float detail_energy[MAX_LEVELS] = {};
+        float detail_max[MAX_LEVELS] = {};
+        int detail_count[MAX_LEVELS] = {};
+
         float total_energy = 0.0f;
-        
-        for (int i = 0; i + 1 < ch_N; i += 2) {
-            const float x0 = ch_data[i];
-            const float x1 = ch_data[i + 1];
-            const float a = (x0 + x1) * INV_SQRT2;
-            const float d = (x0 - x1) * INV_SQRT2;
-            const float e = d * d;
-            detail_energy += e;
-            detail_max = std::max(detail_max, e);
-            total_energy += a * a + e;
+
+        for (int i = 0; i < N; ++i) {
+            const float x = block[i * num_channels + channel];
+
+            approx[i] = x;
+            total_energy += x * x;
         }
-        
+
         if (total_energy < 1e-10f) {
             state = false;
             return false;
         }
-        
-        const float detail_ratio = detail_energy / (total_energy + 1e-12f);
-        const int pairs = ch_N / 2;
-        const float mean_detail = detail_energy / (pairs + 1e-12f);
-        const float detail_peak = detail_max / (mean_detail + 1e-12f);
-        
-        constexpr float DETAIL_THRESHOLD = 0.010f;
-        constexpr float PEAK_THRESHOLD_ON = 28.0f;
-        constexpr float PEAK_THRESHOLD_OFF = 18.0f;
-        
-        if (detail_ratio < DETAIL_THRESHOLD) {
+
+        int len = N;
+
+        for (int level = 0; level < MAX_LEVELS && len >= 2; ++level) {
+            const int pairs = len / 2;
+
+            float energy = 0.0f;
+            float maximum = 0.0f;
+
+            for (int i = 0; i < pairs; ++i) {
+                const float x0 = approx[2 * i];
+                const float x1 = approx[2 * i + 1];
+
+                const float a =
+                    (x0 + x1) * INV_SQRT2;
+
+                const float d =
+                    (x0 - x1) * INV_SQRT2;
+
+                next[i] = a;
+
+                const float e = d * d;
+
+                energy += e;
+
+                if (e > maximum)
+                    maximum = e;
+            }
+
+            detail_energy[level] = energy;
+            detail_max[level] = maximum;
+            detail_count[level] = pairs;
+
+            for (int i = 0; i < pairs; ++i)
+                approx[i] = next[i];
+
+            len = pairs;
+        }
+
+        float bass_energy = 0.0f;
+
+        for (int i = 0; i < len; ++i)
+            bass_energy += approx[i] * approx[i];
+
+        float rest_energy = 0.0f;
+
+        for (int level = 0; level < MAX_LEVELS; ++level)
+            rest_energy += detail_energy[level];
+
+        const float bass_dominance =
+            bass_energy / (rest_energy + EPSILON);
+
+        const bool bass_dominates =
+            bass_dominance >= BASS_DOMINANCE_THRESHOLD;
+
+        float peak_score = 0.0f;
+
+        for (int level = 0; level < MAX_LEVELS; ++level) {
+            const int count = detail_count[level];
+
+            if (count <= 0)
+                continue;
+
+            const float energy = detail_energy[level];
+
+            if (energy < EPSILON)
+                continue;
+
+            const float mean_detail =
+                energy / static_cast<float>(count);
+
+            const float detail_peak =
+                detail_max[level] / (mean_detail + EPSILON);
+
+            if (detail_peak > peak_score)
+                peak_score = detail_peak;
+        }
+
+        if (bass_dominates) {
             state = false;
             return false;
         }
-        
+
         if (!state) {
-            if (detail_peak > PEAK_THRESHOLD_ON)
+            if (peak_score > PEAK_THRESHOLD_ON)
                 state = true;
         } else {
-            if (detail_peak < PEAK_THRESHOLD_OFF)
+            if (peak_score < PEAK_THRESHOLD_OFF)
                 state = false;
         }
+
         return state;
     };
 
-    std::vector<float> left(N), right(N);
-    for (int i = 0; i < N; ++i) {
-        left[i] = data[i * num_channels];
-        right[i] = (num_channels > 1) ? data[i * num_channels + 1] : 0.0f;
-    }
-    
     static bool is_transient_L = false;
     static bool is_transient_R = false;
-    
-    bool trans_L = check_channel(left.data(), N, is_transient_L);
-    bool trans_R = check_channel(right.data(), N, is_transient_R);
-    
-    is_transient = trans_L || trans_R;
-    return is_transient;
-}
 
-inline bool detect_transient_block_mono(const std::vector<float>& block, int num_channels) {
-    int N = (int)(block.size() / num_channels);
-    const float* data = block.data();
-    if (N < 64) return false;
-    float diff_energy = 0.0f, total_energy = 0.0f, max_abs = 0.0f;
-    for (int i = 0; i < N; ++i) {
-        float sample = data[i * num_channels];
-        float av = std::abs(sample);
-        if (av > max_abs) max_abs = av;
-        total_energy += sample * sample;
-        if (i > 0) {
-            float diff = sample - data[(i - 1) * num_channels];
-            diff_energy += diff * diff;
-        }
+    const bool trans_L =
+        check_channel(0, is_transient_L);
+
+    bool trans_R = false;
+
+    if (num_channels > 1) {
+        trans_R = check_channel(1, is_transient_R);
+    } else {
+        is_transient_R = false;
     }
-    if (total_energy < 1e-6f) return false;
-    float smoothness_ratio = diff_energy / total_energy;
-    float rms              = std::sqrt(total_energy / N);
-    float peak_to_rms      = max_abs / (rms + 1e-12f);
-    return !((smoothness_ratio < 0.5f) && (peak_to_rms < 3.00f));
+
+    is_transient = trans_L || trans_R;
+
+    return is_transient;
 }
 
 inline bool detect_strong_transient(const std::vector<float>& energy0,
