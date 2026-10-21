@@ -646,7 +646,7 @@ compress_audio_streaming(
 
     std::unique_ptr<PowCodec> pow_enc;
     if (!speed_mode) {
-        pow_enc = std::make_unique<PowCodec>(num_channels, 0.85f, true, target_kbps / float(num_channels));
+        pow_enc = std::make_unique<PowCodec>(num_channels, 0.85f, target_kbps / float(num_channels));
     }
 
     int current_pos = 0;
