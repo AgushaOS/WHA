@@ -222,4 +222,5 @@ public:
     }
 };
 
+
 #endif // WAVELET_H
