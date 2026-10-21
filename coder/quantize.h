@@ -249,3 +249,4 @@ inline QuantResult quantize_levels(
 }
 
 #endif // QUANTIZE_H
+

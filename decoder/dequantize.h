@@ -17,3 +17,4 @@ inline void dequantize_band(
 }
 
 #endif // DEQUANTIZE_H
+

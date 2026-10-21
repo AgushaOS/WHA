@@ -17,7 +17,6 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
     size_t n = mid.size();
     left.resize(n);
     right.resize(n);
-
     for (size_t i = 0; i < n; ++i) {
         left[i]  = mid[i] + side[i];
         right[i] = mid[i] - side[i];
@@ -244,14 +243,11 @@ inline std::pair<std::vector<float>, std::vector<float>> mid_side(const std::vec
                                                                   const std::vector<float>& right)
 {
     size_t n = left.size();
-
     std::vector<float> mid(n), side(n);
-
     for (size_t i = 0; i < n; ++i) {
         mid[i]  = (left[i] + right[i]) * 0.5f;
         side[i] = (left[i] - right[i]) * 0.5f;
     }
-
     return {mid, side};
 }
 
@@ -297,7 +293,7 @@ inline bool should_use_is_band(const std::vector<float>& left,
     if (eL + eR < eps) return false;
     const double correlation = cross / (std::sqrt(eL * eR) + eps);
     const double abs_correlation = std::abs(correlation);
-    constexpr double IS_CORRELATION_THRESHOLD = 0.40;
+    constexpr double IS_CORRELATION_THRESHOLD = 0.60;
     if (abs_correlation >= IS_CORRELATION_THRESHOLD) return true;
     
     const double meanL = eL / (double)n;

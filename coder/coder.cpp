@@ -85,9 +85,8 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     uint32_t block_index,
     PredContext& pred_ctx)
 {
-    const float eps     = 1e-12f;
-    const bool  stereo  = (num_channels == 2);
-
+    const float eps = 1e-12f;
+    const bool stereo = (num_channels == 2);
     std::vector<std::vector<float>> left_coeffs, right_coeffs;
     std::vector<int> coeff_counts;
 
@@ -230,52 +229,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                 }
             }
         }
-
-        if (use_is) {
-            BandEnergy be = compute_band_energy(ch0_bands, ch1_bands, is_band, stereo, band_count);
-            int is_seg_threshold = 6 * total_bands / 16;
-
-            for (int i = is_start_default; i < band_count; ++i) {
-                bool force_is  = !adaptive_is || (i >= is_start_max);
-                bool choose_is = force_is;
-
-                if (!force_is) {
-                    choose_is = should_use_is_band(
-                        left_coeffs[i], right_coeffs[i],
-                        enable_ms, target_kbps,
-                        SETTINGS.is_strong_ratio_threshold,
-                        SETTINGS.is_equal_ratio_threshold,
-                        SETTINGS.is_equal_ratio_threshold_low_bitrate);
-                }
-
-                if (choose_is) {
-                    is_band[i] = 1;
-                    mode_ms[i] = 1;
-
-                    std::array<float, 4> r_arr;
-                    bool inv_flag = false;
-                    bool use_segmented = false;
-                    std::vector<float> Y;
-
-                    compute_is_parameters_ex(left_coeffs[i], right_coeffs[i],
-                                             Y, r_arr,
-                                             inv_flag, use_segmented,
-                                             i, total_bands);
-
-                    is_r_vals[i]       = r_arr;
-                    is_inv_flags[i]    = inv_flag;
-                    is_use_segmented[i] = (i < is_seg_threshold);
-                    ch0_bands[i] = std::move(Y);
-                    ch1_bands[i] = ch0_bands[i];
-                } else {
-                    is_band[i] = 0;
-                    mode_ms[i] = 0;
-                    auto [mid, side] = mid_side(left_coeffs[i], right_coeffs[i]);
-                    ch0_bands[i] = mid;
-                    ch1_bands[i] = side;
-                }
-            }
-        }
     } else {
         for (int i = 0; i < band_count; ++i) {
             ch0_bands[i] = left_coeffs[i];
@@ -297,7 +250,6 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     static std::vector<std::vector<float>> prev_ch0, prev_ch1;
     std::vector<float> priority0, priority1;
-
     if (stereo) {
         priority0 = compute_channel_priority(
             ch0_bands, prev_ch0, coeff_counts, target_kbps, sr, level, false);
@@ -308,6 +260,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             ch0_bands, prev_ch0, coeff_counts, target_kbps, sr, level, false);
         priority1.assign(band_count, 0.0f);
     }
+
     std::vector<int> min_bits(band_count, 0);
     std::vector<int> max_bits(band_count, 10);
     if (use_is) {
@@ -341,7 +294,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         else active1[i] = false;
     }
 
-    int sbr_end = block_is_full ? (3 * band_count / 4) : 0;
+    int sbr_end = block_is_full ? (14 * band_count / 16) : 0;
     SBREncodeResult sbr = sbr_analyze(
         ch0_original, active0, sbr_end, band_count, SBR_W0, SBR_W1);
 
@@ -684,7 +637,7 @@ compress_audio_streaming(
 
     float target_kbps = (target_kbps_in > 0) ? target_kbps_in : SETTINGS.default_target_kbps;
     float per_channel_kbps = target_kbps / num_channels;
-    float overlap_factor = (per_channel_kbps <= 0.0f) ? 0.0f : 1.0f;
+    float overlap_factor = (per_channel_kbps <= 0.0f) ? 2.0/3.0f : 1.0f;
 
     PWPT wpt;
     std::vector<std::vector<uint8_t>> blocks_raw;
@@ -693,7 +646,7 @@ compress_audio_streaming(
 
     std::unique_ptr<PowCodec> pow_enc;
     if (!speed_mode) {
-        pow_enc = std::make_unique<PowCodec>(num_channels, 0.85f, true, target_kbps / float(num_channels));
+        pow_enc = std::make_unique<PowCodec>(num_channels, 0.85f, target_kbps / float(num_channels));
     }
 
     int current_pos = 0;
@@ -793,10 +746,9 @@ compress_audio_streaming(
             std::copy(audio_buffer.begin() + offset, audio_buffer.end(), analyze_buf.begin());
         }
 
-        bool is_transient = (num_channels == 2)
-            ? detect_transient_block_stereo(analyze_buf, num_channels)
-            : detect_transient_block_mono(analyze_buf, num_channels);
+        bool is_transient = detect_transient_block_stereo(analyze_buf, num_channels);
 
+        // is_transient = false;
         int block_size, right_overlap, level;
         if (is_transient) {
             block_size = 1024;
