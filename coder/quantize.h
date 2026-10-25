@@ -41,11 +41,13 @@ struct QuantResult {
     std::vector<std::vector<int32_t>> quantized_per_level;
 };
 
+TemporalMaskingState* tm_state = nullptr;
+
 inline QuantResult quantize_levels(
     const std::vector<std::vector<std::vector<float>>>& coeffs_channels,
     const std::vector<int>& bits_per_level,
     float target_kbps,
-    TemporalMaskingState* tm_state = nullptr)
+    float true_num_channels)
 {
     const int num_channels = static_cast<int>(coeffs_channels.size());
     const int band_count   = static_cast<int>(coeffs_channels[0].size());
@@ -233,6 +235,10 @@ inline QuantResult quantize_levels(
             (bbits == 1)
                 ? ((sgn == 1) ? max_abs : -max_abs)
                 : max_abs;
+        
+        if (target_kbps / true_num_channels < 96.0f) {
+            scales[l] /= 16.0f;
+        }
 
         quantized_per_level[l] = std::move(quantized);
     }

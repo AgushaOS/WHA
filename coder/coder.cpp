@@ -301,13 +301,13 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<uint8_t> header;
     std::vector<std::vector<std::vector<float>>> for_quant0(1);
     for_quant0[0] = std::move(ch0_bands);
-    QuantResult qres0 = quantize_levels(for_quant0, bits0, target_kbps);
+    QuantResult qres0 = quantize_levels(for_quant0, bits0, target_kbps, num_channels);
 
     QuantResult qres1;
     if (stereo) {
         std::vector<std::vector<std::vector<float>>> for_quant1(1);
         for_quant1[0] = std::move(ch1_bands);
-        qres1 = quantize_levels(for_quant1, bits1, target_kbps);
+        qres1 = quantize_levels(for_quant1, bits1, target_kbps, num_channels);
     }
 
     std::vector<uint32_t> scale_raw0, scale_raw1, scale_pred0, scale_pred1;

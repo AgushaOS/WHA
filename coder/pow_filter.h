@@ -1,5 +1,4 @@
 #pragma once
-
 #include <vector>
 #include <cmath>
 #include <cstdint>
@@ -25,43 +24,51 @@ public:
     static constexpr int PAD   = NFFT / 2;
 
     PowCodec(int num_channels, float gamma, float kbps_per_channel)
-      : num_channels_(num_channels), gamma_(gamma), 
-        kbps_per_channel_(kbps_per_channel),
-        channels_(num_channels), ch_out_(num_channels)
-    {
-        if (num_channels_ <= 0) throw std::runtime_error("PowCodec: bad channels");
-        if (std::fabs(gamma_ - 0.85f) > 1e-6f)
-            throw std::runtime_error("PowCodec: this optimized version requires gamma = 0.85");
+       : num_channels_(num_channels), gamma_(gamma), 
+         kbps_per_channel_(kbps_per_channel),
+         channels_(num_channels), ch_out_(num_channels)
+     {
+         if (num_channels_ <= 0) throw std::runtime_error("PowCodec: bad channels");
+         if (std::fabs(gamma_ - 0.85f) > 1e-6f)
+             throw std::runtime_error("PowCodec: this optimized version requires gamma = 0.85");
+         
+         if (kbps_per_channel_ < 48.0f) {
+             max_mag_multiplier_ = 16.0f;
+         } else if (kbps_per_channel_ < 64.0f) {
+             max_mag_multiplier_ = 4.0f;
+         } else {
+             max_mag_multiplier_ = 1.0f;
+         }
 
-        in_     = fftwf_alloc_real(NFFT);
-        out_c_  = fftwf_alloc_complex(NBINS);
-        in_c2r_ = fftwf_alloc_complex(NBINS);
-        out_    = fftwf_alloc_real(NFFT);
-        if (!in_ || !out_c_ || !in_c2r_ || !out_) throw std::runtime_error("PowCodec: FFTW alloc failed");
-
-        const char* wisdom_file = "fftw_wisdom.dat";
-        fftwf_import_wisdom_from_filename(wisdom_file);
-        
-        r2c_ = fftwf_plan_dft_r2c_1d(NFFT, in_, out_c_, FFTW_MEASURE);
-        c2r_ = fftwf_plan_dft_c2r_1d(NFFT, in_c2r_, out_, FFTW_MEASURE);
-        
-        if (!r2c_ || !c2r_) throw std::runtime_error("PowCodec: FFTW plan failed");
-        fftwf_export_wisdom_to_filename(wisdom_file);
-
-        win_.resize(NFFT);
-        win_sq_.resize(NFFT);
-        for (int i = 0; i < NFFT; ++i) {
-            float s = std::sin((float)M_PI * (float)i / (float)NFFT);
-            win_[i] = std::sqrt(std::sin((float)(M_PI / 2.0) * s * s));
-            win_sq_[i] = win_[i] * win_[i];
-        }
-        
-        for (auto& ch : channels_) {
-            ch.queue.reserve(1024 * 1024); 
-            ch.acc.reserve(1024 * 1024);
-            ch.wacc.reserve(1024 * 1024);
-        }
-    }
+         in_     = fftwf_alloc_real(NFFT);
+         out_c_  = fftwf_alloc_complex(NBINS);
+         in_c2r_ = fftwf_alloc_complex(NBINS);
+         out_    = fftwf_alloc_real(NFFT);
+         
+         if (!in_ || !out_c_ || !in_c2r_ || !out_) throw std::runtime_error("PowCodec: FFTW alloc failed");
+         
+         const char* wisdom_file = "fftw_wisdom.dat";
+         fftwf_import_wisdom_from_filename(wisdom_file);
+         r2c_ = fftwf_plan_dft_r2c_1d(NFFT, in_, out_c_, FFTW_MEASURE);
+         c2r_ = fftwf_plan_dft_c2r_1d(NFFT, in_c2r_, out_, FFTW_MEASURE);
+         
+         if (!r2c_ || !c2r_) throw std::runtime_error("PowCodec: FFTW plan failed");
+         fftwf_export_wisdom_to_filename(wisdom_file);
+         
+         win_.resize(NFFT);
+         win_sq_.resize(NFFT);
+         for (int i = 0; i < NFFT; ++i) {
+             float s = std::sin((float)M_PI * (float)i / (float)NFFT);
+             win_[i] = std::sqrt(std::sin((float)(M_PI / 2.0) * s * s));
+             win_sq_[i] = win_[i] * win_[i];
+         }
+         
+         for (auto& ch : channels_) {
+             ch.queue.reserve(1024 * 1024); 
+             ch.acc.reserve(1024 * 1024);
+             ch.wacc.reserve(1024 * 1024);
+         }
+     }
 
     ~PowCodec() {
         if (r2c_) fftwf_destroy_plan(r2c_);
@@ -75,7 +82,6 @@ public:
     void process(const float* in, size_t frames, std::vector<float>& out) {
         if (frames == 0) return;
         out.reserve(out.size() + frames * num_channels_);
-        
         for (int c = 0; c < num_channels_; ++c) {
             size_t old_size = channels_[c].queue.size();
             channels_[c].queue.resize(old_size + frames);
@@ -84,12 +90,10 @@ public:
             }
             channels_[c].total_in += frames;
         }
-
         for (int c = 0; c < num_channels_; ++c) {
             ch_out_[c].clear();
             processChannel(channels_[c], ch_out_[c], false);
         }
-
         const size_t n_out = ch_out_.empty() ? 0 : ch_out_[0].size();
         size_t out_old_size = out.size();
         out.resize(out_old_size + n_out * num_channels_);
@@ -105,7 +109,6 @@ public:
             ch_out_[c].clear();
             processChannel(channels_[c], ch_out_[c], true);
         }
-
         const size_t n_out = ch_out_.empty() ? 0 : ch_out_[0].size();
         size_t out_old_size = out.size();
         out.resize(out_old_size + n_out * num_channels_);
@@ -137,9 +140,10 @@ private:
     int num_channels_;
     float gamma_;
     float kbps_per_channel_; 
+    float max_mag_multiplier_ = 1.0f; 
+    
     std::vector<ChannelState> channels_;
     std::vector<std::vector<float>> ch_out_; 
-
     fftwf_plan r2c_{};
     fftwf_plan c2r_{};
     float* in_ = nullptr;
@@ -151,11 +155,10 @@ private:
 
     void processFrameInPlace(float* frame) {
         for (int i = 0; i < NFFT; ++i) in_[i] = frame[i] * win_[i];
-
         fftwf_execute(r2c_);
 
         alignas(32) float orig_mag[NBINS];
-        float max_mag = 0.0f;
+        float max_mag = 1e-20f; 
         for (int i = 0; i < NBINS; ++i) {
             const float re = out_c_[i][0];
             const float im = out_c_[i][1];
@@ -164,22 +167,17 @@ private:
             if (m > max_mag) max_mag = m;
         }
 
-        if (kbps_per_channel_ < 64.0f) {
-            max_mag *= 4.0f;
-        }
+        max_mag *= max_mag_multiplier_;
 
         alignas(32) float mag[NBINS];
         std::memcpy(mag, orig_mag, sizeof(mag));
 
-        if (max_mag > 1e-20f) {
-            const float inv_max = 1.0f / max_mag;
-            constexpr float GAMMA = 0.85f;
-            
-            for (int i = 0; i < NBINS; ++i) {
-                float n = mag[i] * inv_max;
-                n = fast_powf(n, GAMMA); 
-                mag[i] = n * max_mag;
-            }
+        const float inv_max = 1.0f / max_mag;
+        constexpr float GAMMA = 0.85f;
+        for (int i = 0; i < NBINS; ++i) {
+            float n = mag[i] * inv_max;
+            n = fast_powf(n, GAMMA); 
+            mag[i] = n * max_mag;
         }
 
         for (int i = 0; i < NBINS; ++i) {
@@ -251,19 +249,15 @@ private:
                 if (avail <= 0 && cs.next_frame >= input_end) break;
                 cs.queue.resize((size_t)(q_idx + NFFT), 0.0f);
             }
-
             alignas(32) float frame[NFFT];
             std::memcpy(frame, cs.queue.data() + q_idx, NFFT * sizeof(float));
-            
             processFrameInPlace(frame);
-            
             ensureAcc(cs, cs.next_frame + NFFT);
-            const int64_t a_idx = cs.next_frame - cs.acc_start;
             
+            const int64_t a_idx = cs.next_frame - cs.acc_start;
             float* __restrict__ acc_ptr = cs.acc.data() + a_idx;
             float* __restrict__ wacc_ptr = cs.wacc.data() + a_idx;
             const float* __restrict__ win_ptr = win_sq_.data();
-            
             for (int i = 0; i < NFFT; ++i) {
                 acc_ptr[i] += frame[i];
                 wacc_ptr[i] += win_ptr[i];
