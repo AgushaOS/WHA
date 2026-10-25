@@ -38,6 +38,9 @@ More details about both modes provided below.
 ## Comparing quality to other codecs
 - Quality on all bitrates is better than Vorbis at mostly all music + film data if to judge from tested files
 - Quality on all bitrates is better than LC3 at mostly all music + film data if to judge from tested files
+- 64 kbps, in terms of quality, are comparable to 128 kbps of MP3
+- 96 kbps, in terms of quality, are comparable to 160 kbps of MP3
+- 128 kbps, in terms of quality, are comparable to 192+ kbps of MP3
 
 For more detailed tests try to look at releases. There are always PEAQ tests there with full table
 
