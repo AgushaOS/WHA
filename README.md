@@ -1,139 +1,89 @@
-# Wavelet Hierarchical Audio (Outdated, will be updated soon enough)
+# Wavelet Hierarchical Audio 
 
-WHA (Wavelet Hierarchical Audio, Вейвлет-иерархическое Аудио) -- это высокопроизводительный перцептивный аудиокодек, основанный на вейвлет-пакетном разложении сигнала. 
+**WHA (Wavelet Hierarchical Audio)** is an audio codec based on WPT (Wavelet Packet Transform), written in C++, with two main goals:
+1) **High-speed audio compression** for music and film audio
+2) **An excellent speed-to-quality ratio**, delivering high audio quality at all available bitrates while being very fast to encode and decode.
 
-## Характеристики кодека
+There are two modes for encoding: **speed** and **quality**.
+More details about both modes provided below.
 
-- Алгоритмическая задержка: ~22-44 мс на блок
-- Скорость кодирования превышает MP3 LIB3LAME в ~5.3 раза, AAC-LC в ~5.3 раз, Opus в ~4 раза
-- Скорость декодирования сравнима с MP3 на 128 кбит/с, сравнима с Opus на <128 кбит/с
-- Прозрачное качество достигается на битрейтах 160 - 192 кбит/с для большинства треков по PEAQ.
-- Полупрозрачное/почтипрозрачное качество достигается на битрейтах 96-128 кбит/с
-- Слушабельное/нормальное качество достигается на 64 кбит/с
-- Перекрытие между блоками: ~4.56-9.12%
-- Поддержка: 44.1 кГц и 22.05 кГц
-- Плавное затухание частот выше 16 кГц с сохранением формы спектра на низких битрейтах, вместо стандартного lowpass
-- Стерео, моно
-- Работает в режиме ABR
-- Сравним с Vorbis по gstPEAQ и ViSQOL на 128 кбит/с
-- Превышает Vorbis по gstPEAQ и ViSQOL на <128 кбит/с
+## Codec Specifications
 
-## Описание алгоритма
+**Quality mode:**
+- Default mode for encoding
+- Encoding speed is 50-66% of MP2's encoding speed on stereo audio for all bitrates
+- Decoding speed is 50-66% of MP2's decoding speed on stereo audio for all bitrates
+- Excellent audio quality at bitrates 128 kbps and higher
+- Good to very good audio quality at 96 kbps
+- Good audio quality at 64 kbps
+- Handles spectrally sparse audio well
+- Recommended for bitrates below 128 kbps due to its lower noise levels
 
-В аудиокодеке используется вейвлет-пакетное разложение (WPT), вместо модифицированного косинусного преобразования (MDCT).
+**Speed mode:**
+- Encoding speed is 95-105% of MP2's encoding speed on stereo audio for all bitrates
+- Decoding speed is 95-105% of MP2's decoding speed on stereo audio for all bitrates
+- Not default mode for encoding
+- Excellent audio quality at bitrates 128 kbps and higher
+- Good to very good audio quality at 96 kbps (less stable)
+- Normal to good audio quality at 64 kbps
+- Does not handle spectrally sparse music as well
+- Not recommended for bitrates below 128 kbps due to its higher noise levels
 
-Также вместо фильтр-банки используется лифтинг схема с длиной предсказания и обновления 16 и 6 точки соответственно, что позволяет достичь быстрого разложения сигнала на субполосы с достаточно хорошими частотными характеристиками.
+## PEAQ, ViSQOL and all other perceptual evaluators
+- gstPEAQ is better for 128 kbps and higher, but there are some tracks that are problematic for gstPEAQ to evaluate. But it is also good for lower bitrates. Recommended for general use.
+- ViSQOL is better for bitrates lower than 128 kbps, but it is really bad for noisy audio (there some tracks, that are graded better in "speed mode" than in "quality mode" on 64 kbps. They've been tested, it isn't true). Recommended for general use only with something else (like gstPEAQ).
+- PQEvalAudio has worse correlation with reality than gstPEAQ, but there are tracks that are tested by it better. Not recommended for general use.
+- gstPEAQ Advanced is worse of all above in terms of correlation with reality. Not recommended for general use.
 
-После упорядочивания по Грэй-коду (Gray-code), происходит кодирование совместного стерео (Joint Stereo), где для каждой пары субполос из разных каналов выбирается LR/MS/IS.
+## Comparing quality to other codecs
+- Quality on all bitrates is better than Vorbis at mostly all music + film data if to judge from tested files
+- Quality on all bitrates is better than LC3 at mostly all music + film data if to judge from tested files
+- 64 kbps, in terms of quality, are comparable to 128 kbps of MP3
+- 96 kbps, in terms of quality, are comparable to 160 kbps of MP3
+- 128 kbps, in terms of quality, are comparable to 192+ kbps of MP3
 
-В качестве психоакустики была использована система приоритетно-перцептивного взвешивания энергии субполосы, что позволяет достаточно точно и быстро распределять биты.
+For more detailed tests try to look at releases. There are always PEAQ tests there with full table
 
-Шаг квантования на субполосу определяется из количества выданных ей битов, что позволяет почти всегда упаковывать блок в выданный бит-бюджет.
+## Algorithm
+**Quality mode:**
+- Encoding:
+  - Block complexity: **O(NlogN)** 
+  - Block memory complexity: **O(N)**
 
-На уже квантованные значения применяется декорреляционная и энтропийная системы. 
+- Decoding:
+  - Block complexity: **O(NlogN)**
+  - Block memory complexity: **O(N)**
 
-В качестве энтропийного кодировщика используются райс-коды (Rice code) с адаптивным k на субполосу.
+**Speed mode:**
+- Encoding:
+  - Block complexity: **O(N)** 
+  - Block memory complexity: **O(N)**
 
-Система бит-резервуара между блоками устроена по принципу "выигрыш с предыдущего переместить на нынешний" с ограничителем в не более 20% от заданного бит-бюджета.
+- Decoding:
+  - Block complexity: **O(N)**
+  - Block memory complexity: **O(N)**
 
-Активно используется адаптивная система Intensity Stereo на битрейтах 64-192 кбит/с 
+Details will be published in papers about the codec.
 
-Активно используется система WSC (Wavelet Subband Completion) для всех битрейтов для заполнения пропущенных полос.
+## Usage
+**Compiling:**
+For usage, it is better to compile before FFTW with AVX optimizations for full potential speed on quality mode.
+```bash
+//Compiling codec
+./setup.sh
+```
+**Encoding:**
+```bash
+//Encoding quality mode
+./code [input.wav] [bitrate]
 
-В качестве пост-обработки используется дизеринг на битрейты <=192 кбит/с и гармоническое шумоподавление на битрейты <=96 кбит/с через FFT. 
+//Encoding speed mode
+./code [input.wav] [bitrate] --speed
 
-## Сохранение ВЧ (частот > 16 кГц)
-
-Благодаря неидеальной частотной локализации фильтров и перекрытию субполос, что в АЧХ вейвлета направлены с ВЧ->НЧ/СЧ, высокочастотная энергия частично распределяется в соседние низшие диапазоны.
-
-Это позволяет сохранять форму спектра и временную структуру сигнала в высокочастотной области, обеспечивая более плавное затухание высоких частот вместо жёсткого обрезания (brick-wall), характерного для традиционных кодеков, даже при частичном подавлении или низком битрейте.
-
-Диапазон сохранения энергии ВЧ (вплоть до 22.05 кГц):
-- на 192 кбит/с: 25% - 97%
-- на 160 кбит/с: 23% - 94%
-- на 128 кбит/с: 20% - 80%
-
-## Перцептивная модель
-
-Кодек оптимизирован на сохранение:
-- спектральной огибающей сигнала
-- транзиентной структуры
-- высокочастотной текстуры без резких cutoff-артефактов
-- быстрое сжатие с хорошим качеством
-
-## Обработка транзиентов и артефакты пост/пре эха
-
-Благодаря вейвлет-пакетному разложению (WPT), транзиенты локализируются естественным образом внутри временно-частотных субполос, без необходимости отдельных детекций. 
-
-Артефакты пост-эха и пре-эха не были зафиксированы на тестовых сигналах с резкими атаками (включая стерео хлопки).
-
-## Межблочная устойчивость
-
-Для декодирования текущего блока требуется только небольшая часть данных предыдущего блока (~4.56-9.12%), используемая для коррекции граничных эффектов при восстановлении сигнала.
-
-Основная часть блока декодируется независимо, что позволяет выполнять потоковое воспроизведение с низкой алгоритмической задержкой (~44 мс) и минимальным буфером (не более одного блока).
-
-Имеется состояние для предсказания шага квантования, но оно опционально и его можно выключить.
-
-## Устойчивость к потере данных
-
-Потеря отдельных блоков локализуется в пределах текущего фрейма и не приводит к распространению ошибки на последующие блоки, если знать при передаче когда стоит разорвать состояние в шагах квантования.
-
-## Масштабируемость
-
-Кодек поддерживает работу с произвольным целевым битрейтом, задаваемым при инициализации, начиная от 48 кбит/с.
-
-Поддерживаемые частоты дискретизации: 44.1 кГц, 22.05 кГц
-
-## Поведение при снижении битрейта
-
-При снижении битрейта качество деградирует постепенно без резких пороговых артефактов.
-
-Основной характер искажений:
-- ослабление высокочастотной энергии
-- упрощение шумовой составляющей
-- сохранение временной структуры сигнала
-- сохранение транзиентной структуры сигнала
-- возможное искажение чистых синусоидальных сигналов 
-
-## Известные артефакты
-
-При экстремально низких битрейтах (ниже 128 кбит/с) могут наблюдаться:
-- упрощение шумовой текстуры
-- частичная потеря высокочастотной детализации
-- смазывание инструментов
-
-## Ограничения 
-
-Кодек плохо справляется с битрейтами ниже 128 кбит/с для стерео аудио файла, а также наблюдается снижение эффективности при работе с частотой дискретизации равной 48 кГц. 
-
-## Асимптотика алгоритма
-
-Благодаря неглубокому вейвлет-пакетному разложению (WPT) асимптотика алгоритма в пределах O(N).
-
-Сложность кодирования и декодирования линейно зависит от количество сэмплов в сигнале, без итеративных этапов оптимизации.
-
-# Результаты MOS тестирований
-
-Результаты MOS тестирования проводились используя наушники DT770-Pro 32 Ohm и плеер FiiO JM21 на тихой и средней громкостях. 
-
-Участвовало 5 человек возрастом от 16 до 17 лет, в числе которых были 2 музыканта. 
-
-Была использована 5 балльная шкала MOS:
-Результаты тестирований:
-- 192 кбит/с: 4.6 (1 человек) и 5 (4 человека). 
-- 160 кбит/с: 4.6 (2 человека) и 5 (3 человека).
-- 128 кбит/с: 4.3 (1 человек) и 4.6 (4 человека).
-- 96 кбит/с: 4 (2 человека) и 4.3 (3 человека).
-- 64 кбит/с: 3.5 (2 человека) и 4.2 (3 человека).
-  
-Примечание: результаты представляют собой неформальную MOS-оценку и не соответствуют стандартизированному тестированию.
-
-# Как запускать кодек
-
-В файлах есть скрипт setup.sh -- он отвечает за компилирование кодека, его бинарника кодирования (code) и его бинарника декодирования (decode). И
-
-нтерфейсы функций следующие:
-- ./code "example.wav" [bitrate] (на выходе файл формата .wha)
-- ./decode "example.wha" "output.wav"
- 
+// Both files will be written into [input].wha format
+```
+**Decoding:**
+```bash
+//Decoding (for both quality and speed mode)
+./decode [input.wha] [output.wav] 
+```

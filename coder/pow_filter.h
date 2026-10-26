@@ -1,4 +1,5 @@
 #pragma once
+
 #include <vector>
 #include <cmath>
 #include <cstdint>
@@ -155,6 +156,7 @@ private:
 
     void processFrameInPlace(float* frame) {
         for (int i = 0; i < NFFT; ++i) in_[i] = frame[i] * win_[i];
+
         fftwf_execute(r2c_);
 
         alignas(32) float orig_mag[NBINS];
@@ -252,6 +254,7 @@ private:
             alignas(32) float frame[NFFT];
             std::memcpy(frame, cs.queue.data() + q_idx, NFFT * sizeof(float));
             processFrameInPlace(frame);
+            
             ensureAcc(cs, cs.next_frame + NFFT);
             
             const int64_t a_idx = cs.next_frame - cs.acc_start;
