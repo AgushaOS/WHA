@@ -42,6 +42,8 @@ More details about both modes provided below.
 - 96 kbps, in terms of quality, are comparable to 160 kbps of MP3
 - 128 kbps, in terms of quality, are comparable to 192+ kbps of MP3
 
+It must be said, that codec was developed for complex music with many details, so anything simple like pure castanets, can sound awful on low bitrates. But castanets + guitar, for example, will be much better. 
+
 For more detailed tests try to look at releases. There are always PEAQ tests there with full table
 
 ## Algorithm
