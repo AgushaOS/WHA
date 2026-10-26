@@ -202,12 +202,6 @@ public:
                     for (float& x : subbands[i])
                         x *= 8.0f;
             }
-
-            // int cutoff_mid = total_bands * 4 / 8;
-            // if (target_kbps / float(channels) < 48.0f) {
-            //     for (size_t i = cutoff_mid; i < subbands.size(); ++i)
-            //         for (float& x : subbands[i]) x *= 4.0f;
-            // }
         }
 
         if (levels > 1) {
@@ -236,6 +230,5 @@ public:
         return pcm;
     }
 };
-
 
 #endif // WAVELET_H

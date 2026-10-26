@@ -582,12 +582,12 @@ void decompress_wha_to_wav(
         for (int i = 0; i < expected_band_count; ++i) {
             ch0_bands[i].clear();
             ch0_bands[i].resize(band_shapes[i], 0.0f);
-            if (active0[i]) dequantize_band(quant0[i], steps0[i], ch0_bands[i]);
+            if (active0[i]) dequantize_band(quant0[i], steps0[i], ch0_bands[i], target_kbps, num_channels);
 
             if (stereo) {
                 ch1_bands[i].clear();
                 ch1_bands[i].resize(band_shapes[i], 0.0f);
-                if (active1[i]) dequantize_band(quant1[i], steps1[i], ch1_bands[i]);
+                if (active1[i]) dequantize_band(quant1[i], steps1[i], ch1_bands[i], target_kbps, num_channels);
             }
         }
 
