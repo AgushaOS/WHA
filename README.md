@@ -1,8 +1,8 @@
 # Wavelet Hierarchical Audio 
 
-**WHA (Wavelet Hierarchical Audio)** is an audio codec based on WPT (Wavelet Packet Transform), written on C++, with two main goals:
+**WHA (Wavelet Hierarchical Audio)** is an audio codec based on WPT (Wavelet Packet Transform), written in C++, with two main goals:
 1) **High-speed audio compression** for music and film audio
-2) **An excellent speed-to-quality ratio**, delivering high audio quality on all available bitrates while maintaining very fast encoding and decoding speeds.
+2) **An excellent speed-to-quality ratio**, delivering high audio quality at all available bitrates while being very fast to encode and decode.
 
 There are two modes for encoding: **speed** and **quality**.
 More details about both modes provided below.
@@ -10,13 +10,13 @@ More details about both modes provided below.
 ## Codec Specifications
 
 **Quality mode:**
+- Default mode for encoding
 - Encoding speed is 50-66% of MP2's encoding speed on stereo audio for all bitrates
 - Decoding speed is 50-66% of MP2's decoding speed on stereo audio for all bitrates
-- Default mode for encoding
 - Excellent audio quality at bitrates 128 kbps and higher
 - Good to very good audio quality at 96 kbps
 - Good audio quality at 64 kbps
-- Handles spectrally sparse music well
+- Handles spectrally sparse audio well
 - Recommended for bitrates below 128 kbps due to its lower noise levels
 
 **Speed mode:**
@@ -26,7 +26,7 @@ More details about both modes provided below.
 - Excellent audio quality at bitrates 128 kbps and higher
 - Good to very good audio quality at 96 kbps (less stable)
 - Normal to good audio quality at 64 kbps
-- Handles spectrally sparse music not so good
+- Does not handle spectrally sparse music as well
 - Not recommended for bitrates below 128 kbps due to its higher noise levels
 
 ## PEAQ, ViSQOL and all other perceptual evaluators
@@ -63,7 +63,7 @@ For more detailed tests try to look at releases. There are always PEAQ tests the
   - Block complexity: **O(N)**
   - Block memory complexity: **O(N)**
 
-Details will be published with papers about codec.
+Details will be published in papers about the codec.
 
 ## Usage
 **Compiling:**
@@ -80,7 +80,7 @@ For usage, it is better to compile before FFTW with AVX optimizations for full p
 //Encoding speed mode
 ./code [input.wav] [bitrate] --speed
 
-// Both files will be written into [input].wha foramt
+// Both files will be written into [input].wha format
 ```
 **Decoding:**
 ```bash
