@@ -9,6 +9,9 @@ More details about both modes provided below.
 
 ## Codec Specifications
 
+**WARNING:**
+Both modes should be used only at 44.1 kHz. 48 kHz and anything else wasn't optimized, so result will be definitely worse!
+
 **Quality mode:**
 - Default mode for encoding
 - Encoding speed is 50-66% of MP2's encoding speed on stereo audio for all bitrates
