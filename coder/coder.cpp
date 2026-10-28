@@ -57,9 +57,12 @@ static int get_adaptive_is_max_base(float target_kbps, const EncoderSettings& s)
     } else if (target_kbps <= 128.0f) {
         k0 = 96.0f; k1 = 128.0f;
         b0 = s.adaptive_is_base_at_96; b1 = s.adaptive_is_base_at_128;
-    } else {
+    } else if (target_kbps <= 160.0f) {
         k0 = 128.0f; k1 = 160.0f;
         b0 = s.adaptive_is_base_at_128; b1 = s.adaptive_is_base_at_160;
+    } else {
+        k0 = 160.0f; k1 = 660.0f;
+        b0 = s.adaptive_is_base_at_160; b1 = s.adaptive_is_base_at_660;
     }
     
     float t = 0.0f;

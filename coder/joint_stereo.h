@@ -29,7 +29,8 @@ inline int get_is_base_original(float target_kbps) {
     else if (target_kbps < 128.0f)  return 2;
     else if (target_kbps < 160.0f)  return 4;
     else if (target_kbps < 190.0f)  return 8;
-    else if (target_kbps < 224.0f)  return 14;
+    else if (target_kbps < 224.0f)  return 10;
+    else if (target_kbps < 660.0f)  return 12;
     else                            return 16;
 }
 

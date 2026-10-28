@@ -47,10 +47,6 @@ inline DualAllocResult allocate_bits_dual(
     for (auto& x : max_bits_in) {
         x = 8;
     }
-    
-    // for (int i = max_bits_in.size() * 3 / 4; i < max_bits_in.size(); i++) {
-    //     max_bits_in[i] = 0;
-    // }
 
     static thread_local std::vector<int> bits0, bits1, max_b, active;
     static thread_local std::vector<float> s2_0, s2_1, factor0, factor1, global_score;
@@ -61,6 +57,16 @@ inline DualAllocResult allocate_bits_dual(
     factor0.resize(n); factor1.resize(n);
     global_score.resize(n);
     active.assign(n, 1);
+
+    for (int64_t i = 0; i < energy0.size() * 4 / 16; i++) {
+        bits0[i] = 2;
+    }
+
+    if (target_kbps <= 192.0f) {
+        for (int64_t i = energy0.size() * 13 / 16; i < energy0.size(); i++) {
+            max_bits_in[i] = 0;
+        }
+    }
 
     if (stereo) {
         if (target_kbps < 128) {

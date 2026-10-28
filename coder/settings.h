@@ -13,6 +13,7 @@ struct EncoderSettings {
     int   adaptive_is_base_at_96          = 3;
     int   adaptive_is_base_at_128         = 6;
     int   adaptive_is_base_at_160         = 12;
+    int   adaptive_is_base_at_660         = 16;
     int   adaptive_is_base_override       = -1;
     float is_strong_ratio_threshold       = 4.0f;
     float is_equal_ratio_threshold        = 2.0f;

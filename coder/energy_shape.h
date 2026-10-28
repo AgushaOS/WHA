@@ -102,6 +102,7 @@ inline void apply_highfreq_attenuation(std::vector<float>& e0, std::vector<float
         else
             start = 4 * (int64_t)e0.size() / 8;
 
+
         for (int64_t i = start; i < (int64_t)e0.size(); ++i)
            e0[i] *= 0.25f;
     } 
