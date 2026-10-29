@@ -93,25 +93,43 @@ inline void apply_highfreq_attenuation(std::vector<float>& e0, std::vector<float
                                        int band_count, float target_kbps,
                                        int num_channels, bool has_transient)
 {
-    if (target_kbps / float(num_channels) >= 64.0f) return;
+    const float kbps_per_channel = target_kbps / float(num_channels);
 
-    if (target_kbps / float(num_channels) < 48.0) {
-        int64_t start;
-        if (!has_transient && target_kbps / float(num_channels) < 48)
-            start = 3 * (int64_t)e0.size() / 8;
-        else
-            start = 4 * (int64_t)e0.size() / 8;
+    if (kbps_per_channel >= 64.0f)
+        return;
 
+    size_t start;
 
-        for (int64_t i = start; i < (int64_t)e0.size(); ++i)
-           e0[i] *= 0.25f;
-    } 
+    if (kbps_per_channel < 48.0f) {
+        start = !has_transient
+            ? 3 * e0.size() / 8
+            : 4 * e0.size() / 8;
+    }
     else {
-        const size_t half = e0.size() / 2;
+        if (has_transient)
+            return;
 
-        if (!has_transient) {
-            for (size_t i = half; i < e0.size(); ++i)
-                e0[i] *= 0.25f;
-        }
+        start = e0.size() / 2;
+    }
+
+    const size_t end = std::min(e0.size(), e1.size());
+
+    if (start >= end)
+        return;
+
+    constexpr float start_gain = 0.25f;
+    constexpr float end_gain   = 0.05f;
+
+    const float denom = float(end - start - 1);
+
+    for (size_t i = start; i < end; ++i) {
+        const float t = denom > 0.0f
+            ? float(i - start) / denom
+            : 1.0f;
+
+        const float gain = start_gain + (end_gain - start_gain) * t;
+
+        e0[i] *= gain;
+        e1[i] *= gain;
     }
 }

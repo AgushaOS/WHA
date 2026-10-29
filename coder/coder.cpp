@@ -289,15 +289,38 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<int> bits0 = std::move(alloc.bits0);
     std::vector<int> bits1 = std::move(alloc.bits1);
 
+    float total_energy = 0.0f;
+    for (int i = 0; i < band_count; ++i) {
+        total_energy += energy0[i];
+        if (stereo) total_energy += energy1[i];
+    }
+
+    bool is_low_bitrate = (target_kbps <= 80.0f);
+    float silence_threshold = is_low_bitrate ? 1e-6f : 1e-7f;
+    bool is_silent_block = (total_energy < silence_threshold);
+
     std::vector<bool> active0(band_count), active1(band_count);
     for (int i = 0; i < band_count; ++i) {
         if (stereo && is_band[i]) bits1[i] = 0;
-        active0[i] = (bits0[i] > 0);
-        if (stereo) active1[i] = (!is_band[i] && bits1[i] > 0);
-        else active1[i] = false;
+        
+        if (is_silent_block) {
+            active0[i] = false;
+            active1[i] = false;
+        } else {
+            active0[i] = (bits0[i] > 0);
+            if (stereo)
+                active1[i] = (!is_band[i] && bits1[i] > 0);
+            else
+                active1[i] = false;
+        }
+        
+        if (!active0[i]) bits0[i] = 0;
+        if (!active1[i]) bits1[i] = 0;
     }
 
     int sbr_end = block_is_full ? (14 * band_count / 16) : 0;
+    // if (is_silent_block) sbr_end = 0;
+
     SBREncodeResult sbr = sbr_analyze(
         ch0_original, active0, sbr_end, band_count, SBR_W0, SBR_W1);
 

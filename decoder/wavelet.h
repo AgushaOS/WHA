@@ -222,10 +222,10 @@ public:
         const float kbps_per_channel =
             target_kbps / float(channels);
 
-        apply_temporal_dither(
-            pcm,
-            kbps_per_channel
-        );
+        // apply_temporal_dither(
+        //     pcm,
+        //     kbps_per_channel
+        // );
 
         return pcm;
     }

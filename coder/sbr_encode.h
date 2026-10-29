@@ -78,7 +78,8 @@ inline SBREncodeResult sbr_analyze(
             }
         }
         result.shape_mask[i] = best_mask;
-        
+
+        // std::cout << int64_t(best_mask) << ' ';        
         double sum_sq  = 0.0;
         float  max_abs = 0.0f;
         for (float v : orig) {
@@ -93,6 +94,7 @@ inline SBREncodeResult sbr_analyze(
         int sb = get_scale_bits(i);
         result.rms_idx[i] = get_scale_idx(rms, sb);
     }
+    // std::cout << '\n';
     return result;
 }
 

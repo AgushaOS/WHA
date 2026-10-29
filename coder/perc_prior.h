@@ -56,6 +56,8 @@ inline std::vector<float> compute_channel_priority(
                 weight_original[old_index] * 0.75f;
     }
 
+    // std::sort(freq_weight.rbegin(), freq_weight.rend());
+
     for (int i = 0; i < band_count; ++i) {
 
         const auto& cur = coeffs[i];
