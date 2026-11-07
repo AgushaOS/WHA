@@ -8,7 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
-#include <memory> 
+#include <memory>
 #include <sys/resource.h>
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
@@ -31,6 +31,117 @@
 float SBR_W0 = 1.0f;
 float SBR_W1 = 9.0f;
 
+static const uint16_t IS_INV_HUFF_CODE[16] = {
+    0x1, 0x0, 0x5, 0x6, 0x4, 0x19, 0x1B, 0x9,
+    0x7, 0x1A, 0x18, 0x1F, 0x5, 0x1E, 0x8, 0x0E
+};
+static const uint8_t IS_INV_HUFF_LEN[16] = {
+    1, 3, 4, 5, 4, 6, 6, 6,
+    4, 6, 6, 7, 5, 7, 6, 6
+};
+
+static const uint16_t ACTIVE_HUFF_CODE[16] = {
+    0x001, 0x002, 0x000, 0x003,
+    0x07D, 0x03F, 0x006, 0x001,
+    0x01E, 0x0F8, 0x00E, 0x003,
+    0x0F9, 0x002, 0x002, 0x001
+};
+static const uint8_t ACTIVE_HUFF_LEN[16] = {
+    2,  5,  6,  5,
+    12, 11, 8,  3,
+    10, 13, 9,  6,
+    13, 7,  6,  1
+};
+
+static const uint16_t MODE_MS_HUFF_CODE[16] = {
+    0x01, 0x00, 0x0F, 0x0C, 0x0D, 0x04, 0x14, 0x15,
+    0x01, 0x09, 0x08, 0x0B, 0x0E, 0x05, 0x03, 0x01
+};
+static const uint8_t MODE_MS_HUFF_LEN[16] = {
+    2, 5, 6, 6, 6, 7, 7, 7,
+    4, 6, 6, 6, 6, 7, 6, 1
+};
+
+struct SymCode { uint16_t code; uint8_t sym; };
+
+static const SymCode ACTIVE_BY_LEN[14][8] = {
+    {{0,0}},
+    {{0x1,15}},
+    {{0x1, 0}},
+    {{0x1, 7}},
+    {{0,0}},
+    {{0x2, 1}, {0x3, 3}},
+    {{0x0, 2}, {0x3, 11}, {0x2, 14}},
+    {{0x2,13}},
+    {{0x6, 6}},
+    {{0xE,10}},
+    {{0x1E, 8}},
+    {{0x3F, 5}},
+    {{0x7D, 4}},
+    {{0xF8, 9}, {0xF9, 12}}
+};
+static const int ACTIVE_COUNT[14] = {0,1,1,1,0,2,3,1,1,1,1,1,1,2};
+
+static const SymCode MODE_MS_BY_LEN[8][8] = {
+    {{0,0}},
+    {{0x1,15}},
+    {{0x1, 0}},
+    {{0,0}},
+    {{0x1, 8}},
+    {{0x0, 1}},
+    {{0xF, 2}, {0xC, 3}, {0xD, 4}, {0x9, 9}, {0x8, 10}, {0xB, 11}, {0xE, 12}, {0x3, 14}},
+    {{0x4, 5}, {0x14, 6}, {0x15, 7}, {0x5, 13}}
+};
+static const int MODE_MS_COUNT[8] = {0,1,1,0,1,1,8,4};
+
+static const SymCode IS_INV_BY_LEN[8][8] = {
+    {{0,0}},
+    {{0x1, 0}},
+    {{0,0}},
+    {{0x0, 1}},
+    {{0x5, 2}, {0x4, 4}, {0x7, 8}},
+    {{0x6, 3}, {0x5, 12}},
+    {{0x19, 5}, {0x1B, 6}, {0x9, 7}, {0x1A, 9}, {0x18, 10}, {0x8, 14}, {0xE, 15}},
+    {{0x1F, 11}, {0x1E, 13}}
+};
+static const int IS_INV_COUNT[8] = {0,1,0,1,3,2,7,2};
+
+static inline int huffman_decode_is_inv(BitReaderMSB& reader)
+{
+    uint32_t code = 0;
+    for (int len = 1; len <= 7; ++len) {
+        code = (code << 1) | reader.read_bits(1);
+        int cnt = IS_INV_COUNT[len];
+        for (int k = 0; k < cnt; ++k)
+            if (IS_INV_BY_LEN[len][k].code == code) return IS_INV_BY_LEN[len][k].sym;
+    }
+    throw std::runtime_error("Invalid Huffman code for IS inversion");
+}
+
+static inline int huffman_decode_active(BitReaderMSB& reader)
+{
+    uint32_t code = 0;
+    for (int len = 1; len <= 13; ++len) {
+        code = (code << 1) | reader.read_bits(1);
+        int cnt = ACTIVE_COUNT[len];
+        for (int k = 0; k < cnt; ++k)
+            if (ACTIVE_BY_LEN[len][k].code == code) return ACTIVE_BY_LEN[len][k].sym;
+    }
+    throw std::runtime_error("Invalid Huffman code for active mask");
+}
+
+static inline int huffman_decode_mode_ms(BitReaderMSB& reader)
+{
+    uint32_t code = 0;
+    for (int len = 1; len <= 7; ++len) {
+        code = (code << 1) | reader.read_bits(1);
+        int cnt = MODE_MS_COUNT[len];
+        for (int k = 0; k < cnt; ++k)
+            if (MODE_MS_BY_LEN[len][k].code == code) return MODE_MS_BY_LEN[len][k].sym;
+    }
+    throw std::runtime_error("Invalid Huffman code for mode_ms");
+}
+
 void decompress_wha_to_wav(
     const std::string& in_wha,
     const std::string& out_wav,
@@ -44,8 +155,8 @@ void decompress_wha_to_wav(
         throw std::runtime_error("Not a WHA container");
 
     uint8_t version = read_u8(f);
-    if (version < 18 || version > 24)
-        throw std::runtime_error("Unsupported container version (only v18-v24)");
+    if (version < 18 || version > 29)
+        throw std::runtime_error("Unsupported container version (only v18-v29)");
 
     uint32_t sr = read_u32(f);
     uint8_t num_channels = read_u8(f);
@@ -53,8 +164,8 @@ void decompress_wha_to_wav(
     float target_kbps = read_f32(f);
     uint8_t block_format_version = read_u8(f);
 
-    if (block_format_version < 18 || block_format_version > 24)
-        throw std::runtime_error("Unsupported block format version (only v18-v24)");
+    if (block_format_version < 18 || block_format_version > 29)
+        throw std::runtime_error("Unsupported block format version (only v18-v29)");
 
     uint32_t total_frames = 0;
     if (version >= 21) total_frames = read_u32(f);
@@ -63,7 +174,7 @@ void decompress_wha_to_wav(
     if (version >= 24) {
         flags = read_u8(f);
     }
-    
+
     bool speed_mode = (flags & 0x01) != 0;
     if (speed_mode) {
         std::cout << ">>> Container indicates SPEED MODE: Post-processing will be skipped automatically <<<\n";
@@ -74,10 +185,13 @@ void decompress_wha_to_wav(
     float per_channel_kbps = target_kbps / num_channels;
     float overlap_factor = (per_channel_kbps <= 0.0f) ? 2.0/3.0f : 1.0f;
 
-    int mode_bytes = (block_count + 7) / 8;
-    std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
-    std::vector<bool> block_modes = unpack_bits(
-        mode_packed.data(), mode_bytes, block_count);
+    std::vector<bool> block_modes;
+    if (block_format_version < 28) {
+        int mode_bytes = (block_count + 7) / 8;
+        std::vector<uint8_t> mode_packed = read_n(f, mode_bytes);
+        block_modes = unpack_bits(
+            mode_packed.data(), mode_bytes, block_count);
+    }
 
     drwav_data_format fmt;
     fmt.container = drwav_container_riff;
@@ -174,7 +288,7 @@ void decompress_wha_to_wav(
 
     auto flush_write_buffer = [&]() {
         if (write_buf.empty()) return;
-        
+
         if (!speed_mode && pow_dec) {
             decoded.clear();
             pow_dec->process(write_buf.data(), write_buf.size() / num_channels, decoded);
@@ -188,7 +302,74 @@ void decompress_wha_to_wav(
     int prev_block_size = 1024;
 
     for (uint32_t bi = 0; bi < block_count; ++bi) {
-        bool use_long_block = block_modes[bi];
+        size_t block_len;
+        if (block_format_version >= 23) {
+            uint16_t len16;
+            f.read((char*)&len16, 2);
+            block_len = len16;
+        } else {
+            block_len = read_u32(f);
+        }
+
+        blk.resize(block_len);
+        f.read((char*)blk.data(), block_len);
+        if ((size_t)f.gcount() < block_len)
+            throw std::runtime_error("Block truncated");
+
+        size_t ptr = 0;
+        bool use_long_block;
+        uint8_t k_scale_byte;
+        uint16_t payload_len;
+
+        if (block_format_version >= 24) {
+            if (blk.size() < 3)
+                throw std::runtime_error("Block too small");
+            uint16_t payload_len_field;
+            memcpy(&payload_len_field, &blk[1], 2);
+            if (block_format_version >= 28) {
+                use_long_block = (payload_len_field & 0x8000) == 0;
+                payload_len = payload_len_field & 0x7FFF;
+            } else {
+                use_long_block = block_modes[bi];
+                payload_len = payload_len_field;
+            }
+            k_scale_byte = blk[0];
+            ptr = 3;
+        } else {
+            use_long_block = block_modes[bi];
+            int level_tmp = use_long_block ? 5 : 4;
+            int ebc = 1 << level_tmp;
+
+            mode_ms.resize(ebc);
+            int mode_bytes_loc = (ebc + 7) / 8;
+            for (int i = 0; i < ebc; ++i) {
+                uint8_t byte = blk[ptr + (i >> 3)];
+                mode_ms[i] = (byte >> (i & 7)) & 1;
+            }
+            ptr += mode_bytes_loc;
+
+            int mask_bytes = (ebc + 7) >> 3;
+            active0.resize(ebc);
+            for (int i = 0; i < ebc; ++i) {
+                uint8_t byte = blk[ptr + (i >> 3)];
+                active0[i] = (byte >> (i & 7)) & 1;
+            }
+            ptr += mask_bytes;
+
+            if (stereo) {
+                active1.resize(ebc);
+                for (int i = 0; i < ebc; ++i) {
+                    uint8_t byte = blk[ptr + (i >> 3)];
+                    active1[i] = (byte >> (i & 7)) & 1;
+                }
+                ptr += mask_bytes;
+            }
+
+            k_scale_byte = blk[ptr++];
+            memcpy(&payload_len, &blk[ptr], 2);
+            ptr += 2;
+        }
+
         int level = use_long_block ? 5 : 4;
         int block_size = use_long_block ? 2048 : 1024;
         int right_overlap = use_long_block
@@ -227,59 +408,6 @@ void decompress_wha_to_wav(
         const std::vector<float>& window = wc.window;
         const std::vector<float>& window_sq = wc.window_sq;
 
-        size_t block_len;
-        if (block_format_version >= 23) {
-            uint16_t len16;
-            f.read((char*)&len16, 2);
-            block_len = len16;
-        } else {
-            block_len = read_u32(f);
-        }
-
-        blk.resize(block_len);
-        f.read((char*)blk.data(), block_len);
-        if ((size_t)f.gcount() < block_len)
-            throw std::runtime_error("Block truncated");
-
-        size_t ptr = 0;
-        auto need = [&](size_t n) {
-            if (ptr + n > blk.size())
-                throw std::runtime_error("Block truncated");
-        };
-
-        if (block_format_version >= 24) {
-            mode_ms.resize(expected_band_count);
-            active0.resize(expected_band_count);
-            if (stereo) active1.resize(expected_band_count);
-        } else {
-            mode_ms.resize(expected_band_count);
-            int mode_bytes_loc = (expected_band_count + 7) / 8;
-            for (int i = 0; i < expected_band_count; ++i) {
-                uint8_t byte = blk[ptr + (i >> 3)];
-                mode_ms[i] = (byte >> (i & 7)) & 1;
-            }
-            ptr += mode_bytes_loc;
-
-            int mask_bytes = (expected_band_count + 7) >> 3;
-            active0.resize(expected_band_count);
-            for (int i = 0; i < expected_band_count; ++i) {
-                uint8_t byte = blk[ptr + (i >> 3)];
-                active0[i] = (byte >> (i & 7)) & 1;
-            }
-            ptr += mask_bytes;
-
-            if (stereo) {
-                active1.resize(expected_band_count);
-                for (int i = 0; i < expected_band_count; ++i) {
-                    uint8_t byte = blk[ptr + (i >> 3)];
-                    active1[i] = (byte >> (i & 7)) & 1;
-                }
-                ptr += mask_bytes;
-            }
-        }
-
-        need(1);
-        uint8_t k_scale_byte = blk[ptr++];
         int k_scale0 = k_scale_byte & 0x07;
         int k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
         bool block_is_full = (k_scale_byte & 0x80) != 0;
@@ -287,23 +415,99 @@ void decompress_wha_to_wav(
 
         int sbr_end = block_is_full ? (14 * expected_band_count / 16) : 0;
 
-        need(2);
-        uint16_t payload_len;
-        memcpy(&payload_len, &blk[ptr], 2);
-        ptr += 2;
+        if (block_format_version >= 24) {
+            mode_ms.resize(expected_band_count);
+            active0.resize(expected_band_count);
+            if (stereo) active1.resize(expected_band_count);
+        }
+
         if (ptr + payload_len > blk.size())
             throw std::runtime_error("Payload truncated");
 
         BitReaderMSB payload_reader(blk.data() + ptr, payload_len);
         ptr += payload_len;
 
-        if (block_format_version >= 24) {
-            uint32_t packed_mode = payload_reader.read_bits(expected_band_count);
-            uint32_t packed_active0 = payload_reader.read_bits(expected_band_count);
-            for (int i = 0; i < expected_band_count; ++i) {
-                mode_ms[i] = (packed_mode >> (expected_band_count - 1 - i)) & 1;
-                active0[i] = (packed_active0 >> (expected_band_count - 1 - i)) & 1;
+        if (block_format_version >= 27) {
+            for (int i = 0; i < expected_band_count; i += 4) {
+                int nibble = huffman_decode_mode_ms(payload_reader);
+                for (int s = 0; s < 4; ++s) {
+                    int idx = i + s;
+                    if (idx < expected_band_count)
+                        mode_ms[idx] = (nibble >> (3 - s)) & 1;
+                }
             }
+            for (int i = 0; i < expected_band_count; i += 4) {
+                int nibble = huffman_decode_active(payload_reader);
+                for (int s = 0; s < 4; ++s) {
+                    int idx = i + s;
+                    if (idx < expected_band_count)
+                        active0[idx] = (nibble >> (3 - s)) & 1;
+                }
+            }
+            if (stereo) {
+                int is_start = get_is_start_band(target_kbps, total_bands);
+                std::vector<int> idx_list;
+                for (int i = 0; i < expected_band_count; ++i) {
+                    bool is_is_band = (i >= is_start) && mode_ms[i];
+                    if (!is_is_band) idx_list.push_back(i);
+                }
+                int non_is_count = (int)idx_list.size();
+                for (int i = 0; i < expected_band_count; ++i) active1[i] = 0;
+                int bit_idx = 0;
+                int n_nibbles = (non_is_count + 3) / 4;
+                for (int j = 0; j < n_nibbles; ++j) {
+                    int nibble = huffman_decode_active(payload_reader);
+                    for (int s = 0; s < 4; ++s) {
+                        if (bit_idx < non_is_count) {
+                            active1[idx_list[bit_idx]] = (nibble >> (3 - s)) & 1;
+                            bit_idx++;
+                        }
+                    }
+                }
+            }
+        } else if (block_format_version >= 26) {
+            uint32_t packed_mode = payload_reader.read_bits(expected_band_count);
+            for (int i = 0; i < expected_band_count; ++i)
+                mode_ms[i] = (packed_mode >> (expected_band_count - 1 - i)) & 1;
+
+            for (int i = 0; i < expected_band_count; i += 4) {
+                int nibble = huffman_decode_active(payload_reader);
+                for (int s = 0; s < 4; ++s) {
+                    int idx = i + s;
+                    if (idx < expected_band_count)
+                        active0[idx] = (nibble >> (3 - s)) & 1;
+                }
+            }
+            if (stereo) {
+                int is_start = get_is_start_band(target_kbps, total_bands);
+                std::vector<int> idx_list;
+                for (int i = 0; i < expected_band_count; ++i) {
+                    bool is_is_band = (i >= is_start) && mode_ms[i];
+                    if (!is_is_band) idx_list.push_back(i);
+                }
+                int non_is_count = (int)idx_list.size();
+                for (int i = 0; i < expected_band_count; ++i) active1[i] = 0;
+                int bit_idx = 0;
+                int n_nibbles = (non_is_count + 3) / 4;
+                for (int j = 0; j < n_nibbles; ++j) {
+                    int nibble = huffman_decode_active(payload_reader);
+                    for (int s = 0; s < 4; ++s) {
+                        if (bit_idx < non_is_count) {
+                            active1[idx_list[bit_idx]] = (nibble >> (3 - s)) & 1;
+                            bit_idx++;
+                        }
+                    }
+                }
+            }
+        } else if (block_format_version >= 24) {
+            uint32_t packed_mode = payload_reader.read_bits(expected_band_count);
+            for (int i = 0; i < expected_band_count; ++i)
+                mode_ms[i] = (packed_mode >> (expected_band_count - 1 - i)) & 1;
+
+            uint32_t packed_active0 = payload_reader.read_bits(expected_band_count);
+            for (int i = 0; i < expected_band_count; ++i)
+                active0[i] = (packed_active0 >> (expected_band_count - 1 - i)) & 1;
+
             if (stereo) {
                 int is_start = get_is_start_band(target_kbps, total_bands);
                 int non_is_count = 0;
@@ -330,23 +534,32 @@ void decompress_wha_to_wav(
         steps0.assign(expected_band_count, 0.0f);
         steps1.assign(expected_band_count, 0.0f);
 
-        auto decode_scales = [&](
+        auto decode_scales_batch = [&](
             std::vector<float>& steps,
             const std::vector<uint8_t>& active,
             int k_scale,
             std::vector<uint32_t>& prev_scale,
             const std::vector<uint8_t>& prev_active)
         {
+            int active_count = 0;
+            for (int i = 0; i < expected_band_count; ++i)
+                if (active[i]) active_count++;
+            if (active_count == 0) return;
+
+            auto all_scales = rice_decode(payload_reader, (size_t)active_count, k_scale);
+            if ((int)all_scales.size() != active_count)
+                throw std::runtime_error("Scale count mismatch");
+
+            int scale_idx = 0;
             for (int i = 0; i < expected_band_count; ++i) {
                 if (!active[i]) continue;
-                auto idx_vec = rice_decode(payload_reader, 1, k_scale);
-                if (idx_vec.empty()) throw std::runtime_error("Scale index missing");
-                uint32_t val = idx_vec[0];
+                uint32_t val = all_scales[scale_idx++];
                 int sb = get_scale_bits(i);
                 int max_idx = (1 << sb) - 1;
                 uint32_t idx;
                 if (use_scale_pred && i < (int)prev_active.size() && prev_active[i]) {
-                    if (i >= (int)prev_scale.size()) throw std::runtime_error("prev_scale out of bounds");
+                    if (i >= (int)prev_scale.size())
+                        throw std::runtime_error("prev_scale out of bounds");
                     int32_t d = zigzag_decode(val);
                     int64_t v = (int64_t)prev_scale[i] + d;
                     if (v < 0) v = 0;
@@ -361,9 +574,9 @@ void decompress_wha_to_wav(
             }
         };
 
-        decode_scales(steps0, active0, k_scale0, pred_state.prev_scale0, pred_state.prev_active0);
+        decode_scales_batch(steps0, active0, k_scale0, pred_state.prev_scale0, pred_state.prev_active0);
         if (stereo)
-            decode_scales(steps1, active1, k_scale1, pred_state.prev_scale1, pred_state.prev_active1);
+            decode_scales_batch(steps1, active1, k_scale1, pred_state.prev_scale1, pred_state.prev_active1);
 
         int k_sub_k0 = (int)payload_reader.read_bits(2);
         int k_sub_k1 = stereo ? (int)payload_reader.read_bits(2) : 0;
@@ -374,10 +587,10 @@ void decompress_wha_to_wav(
             if (stereo && active1[i]) active_count1++;
         }
 
-        auto k_sub_vals0 = rice_decode(payload_reader, active_count0, k_sub_k0);
+        auto k_sub_vals0 = rice_decode(payload_reader, (size_t)active_count0, k_sub_k0);
         std::vector<uint32_t> k_sub_vals1;
         if (stereo)
-            k_sub_vals1 = rice_decode(payload_reader, active_count1, k_sub_k1);
+            k_sub_vals1 = rice_decode(payload_reader, (size_t)active_count1, k_sub_k1);
 
         quant0.resize(expected_band_count);
         quant1.resize(expected_band_count);
@@ -388,11 +601,13 @@ void decompress_wha_to_wav(
         for (int i = 0; i < expected_band_count; ++i) {
             quant0[i].clear();
             if (!active0[i]) continue;
-            if (k_idx0 >= (int)k_sub_vals0.size()) throw std::runtime_error("k_sub_vals0 out of bounds");
+            if (k_idx0 >= (int)k_sub_vals0.size())
+                throw std::runtime_error("k_sub_vals0 out of bounds");
             int k_sub = k_sub_vals0[k_idx0++];
             if (k_sub > 7) k_sub = 7;
-            auto uvals = rice_decode(payload_reader, band_shapes[i], k_sub);
-            if ((int)uvals.size() != band_shapes[i]) throw std::runtime_error("uvals size mismatch ch0");
+            auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_sub);
+            if ((int)uvals.size() != band_shapes[i])
+                throw std::runtime_error("uvals size mismatch ch0");
             quant0[i].resize(uvals.size());
             for (size_t j = 0; j < uvals.size(); ++j)
                 quant0[i][j] = zigzag_decode(uvals[j]);
@@ -403,11 +618,13 @@ void decompress_wha_to_wav(
             for (int i = 0; i < expected_band_count; ++i) {
                 quant1[i].clear();
                 if (!active1[i]) continue;
-                if (k_idx1 >= (int)k_sub_vals1.size()) throw std::runtime_error("k_sub_vals1 out of bounds");
+                if (k_idx1 >= (int)k_sub_vals1.size())
+                    throw std::runtime_error("k_sub_vals1 out of bounds");
                 int k_sub = k_sub_vals1[k_idx1++];
                 if (k_sub > 7) k_sub = 7;
-                auto uvals = rice_decode(payload_reader, band_shapes[i], k_sub);
-                if ((int)uvals.size() != band_shapes[i]) throw std::runtime_error("uvals size mismatch ch1");
+                auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_sub);
+                if ((int)uvals.size() != band_shapes[i])
+                    throw std::runtime_error("uvals size mismatch ch1");
                 quant1[i].resize(uvals.size());
                 for (size_t j = 0; j < uvals.size(); ++j)
                     quant1[i][j] = zigzag_decode(uvals[j]);
@@ -430,12 +647,24 @@ void decompress_wha_to_wav(
 
                 if (!is_indices.empty()) {
                     is_used = true;
-                    int segmented_threshold = 8 * total_bands / 16;
+                    int segmented_threshold = (block_format_version >= 29)
+                        ? get_is_segmented_threshold(target_kbps, total_bands)
+                        : (8 * total_bands / 16);
                     int total_vals = 0;
                     for (int idx : is_indices)
                         total_vals += (idx < segmented_threshold) ? 4 : 1;
 
-                    if (block_format_version >= 24) {
+                    if (block_format_version >= 25) {
+                        for (int idx : is_indices) {
+                            if (idx < segmented_threshold) {
+                                int nibble = huffman_decode_is_inv(payload_reader);
+                                for (int s = 0; s < 4; ++s)
+                                    is_inv[idx][s] = (((nibble >> (3 - s)) & 1) != 0);
+                            } else {
+                                is_inv[idx][0] = (payload_reader.read_bits(1) != 0);
+                            }
+                        }
+                    } else if (block_format_version >= 24) {
                         int total_inv_bits = 0;
                         for (int idx : is_indices)
                             total_inv_bits += (idx < segmented_threshold) ? 4 : 1;
@@ -456,9 +685,8 @@ void decompress_wha_to_wav(
                         for (int idx : is_indices) {
                             bool is_seg = (idx < segmented_threshold);
                             if (is_seg) {
-                                for (int s = 0; s < 4; ++s) {
+                                for (int s = 0; s < 4; ++s)
                                     is_inv[idx][s] = (inv_bits[read_idx++] != 0);
-                                }
                             } else {
                                 is_inv[idx][0] = (inv_bits[read_idx++] != 0);
                             }
@@ -480,7 +708,7 @@ void decompress_wha_to_wav(
                     }
 
                     int k_is = (int)payload_reader.read_bits(3);
-                    auto is_zz_vals = rice_decode(payload_reader, total_vals, k_is);
+                    auto is_zz_vals = rice_decode(payload_reader, (size_t)total_vals, k_is);
                     if ((int)is_zz_vals.size() != total_vals)
                         throw std::runtime_error("IS Rice decode size mismatch");
 
@@ -538,7 +766,7 @@ void decompress_wha_to_wav(
                             for (int idx : is_indices)
                                 total_vals += (idx < segmented_threshold) ? 4 : 1;
 
-                            auto is_zz_vals = rice_decode(is_reader, total_vals, k_is);
+                            auto is_zz_vals = rice_decode(is_reader, (size_t)total_vals, k_is);
                             if ((int)is_zz_vals.size() != total_vals)
                                 throw std::runtime_error("IS Rice decode size mismatch");
 
@@ -598,22 +826,13 @@ void decompress_wha_to_wav(
             for (int i = 0; i < expected_band_count; ++i) {
                 if (mode_ms[i]) {
                     if (block_format_version >= 18 && is_used && i >= is_start && is_start < expected_band_count) {
-                        std::vector<float> left, right;
-                        apply_is(ch0_bands[i], is_r[i], is_inv[i], is_use_segmented[i], left, right);
-                        ch0_bands[i] = std::move(left);
-                        ch1_bands[i] = std::move(right);
+                        apply_is_inplace(ch0_bands[i], ch1_bands[i], is_r[i], is_inv[i], is_use_segmented[i]);
                     } else {
-                        std::vector<float> left_tmp, right_tmp;
-                        ms_to_lr(ch0_bands[i], ch1_bands[i], left_tmp, right_tmp);
-                        ch0_bands[i] = std::move(left_tmp);
-                        ch1_bands[i] = std::move(right_tmp);
+                        ms_to_lr_inplace(ch0_bands[i], ch1_bands[i]);
                     }
                 } else {
                     if (block_format_version >= 18 && is_used && i >= is_start && is_start < expected_band_count) {
-                        std::vector<float> left_tmp, right_tmp;
-                        ms_to_lr(ch0_bands[i], ch1_bands[i], left_tmp, right_tmp);
-                        ch0_bands[i] = std::move(left_tmp);
-                        ch1_bands[i] = std::move(right_tmp);
+                        ms_to_lr_inplace(ch0_bands[i], ch1_bands[i]);
                     }
                 }
             }
@@ -752,4 +971,3 @@ int main(int argc, char** argv)
 
     return 0;
 }
-

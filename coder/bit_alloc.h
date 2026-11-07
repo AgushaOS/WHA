@@ -62,7 +62,7 @@ inline DualAllocResult allocate_bits_dual(
         bits0[i] = 2;
     }
 
-    if (target_kbps <= 192.0f) {
+    if (target_kbps / (stereo ? 2 : 1) <= 96.0f) {
         for (int64_t i = energy0.size() * 13 / 16; i < energy0.size(); i++) {
             max_bits_in[i] = 0;
         }
@@ -145,6 +145,7 @@ inline DualAllocResult allocate_bits_dual(
     }
 
     static thread_local std::vector<float> exp2_table, decay_table;
+
     if (exp2_table.empty()) {
         exp2_table.resize(33);
         decay_table.resize(33);

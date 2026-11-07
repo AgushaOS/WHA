@@ -1,3 +1,4 @@
+
 inline std::vector<float> compute_channel_priority(
     const std::vector<std::vector<float>>& coeffs,
     std::vector<std::vector<float>>& prev_coeffs,
@@ -10,6 +11,9 @@ inline std::vector<float> compute_channel_priority(
     const float eps = 1e-12f;
 
     const int band_count = (int)coeffs.size();
+
+    if (band_count == 0)
+        return {};
 
     if (prev_coeffs.size() != coeffs.size())
         prev_coeffs = coeffs;
@@ -30,6 +34,7 @@ inline std::vector<float> compute_channel_priority(
     std::vector<float> weight_original(total_bands, 1.0f);
 
     for (int i = 0; i < total_bands; ++i) {
+
         const int popcnt =
             __builtin_popcount((unsigned)i);
 
@@ -56,8 +61,6 @@ inline std::vector<float> compute_channel_priority(
                 weight_original[old_index] * 0.75f;
     }
 
-    // std::sort(freq_weight.rbegin(), freq_weight.rend());
-
     for (int i = 0; i < band_count; ++i) {
 
         const auto& cur = coeffs[i];
@@ -67,7 +70,9 @@ inline std::vector<float> compute_channel_priority(
         float l1 = 0.0f;
 
         for (float v : cur) {
+
             const float a = std::fabs(v);
+
             max_v = std::max(max_v, a);
             l1 += a;
         }
@@ -106,7 +111,9 @@ inline std::vector<float> compute_channel_priority(
             std::min(cur.size(), prev.size());
 
         for (size_t k = 0; k < N; ++k) {
+
             corr += cur[k] * prev[k];
+
             norm_prev += prev[k] * prev[k];
             norm_cur += cur[k] * cur[k];
         }
@@ -168,13 +175,91 @@ inline std::vector<float> compute_channel_priority(
                 std::clamp(inter_scale, 0.0f, 1.0f);
         }
 
+        float tonality = 0.0f;
+
+        if (cur.size() >= 16 && abs_energy > eps) {
+
+            double s00 = 0.0;
+            double s01 = 0.0;
+            double s11 = 0.0;
+
+            double sy0 = 0.0;
+            double sy1 = 0.0;
+
+            double ar_energy = 0.0;
+
+            const int count = (int)cur.size();
+
+            for (int k = 2; k < count; ++k) {
+
+                const double a = cur[k - 1];
+                const double b = cur[k - 2];
+                const double y = cur[k];
+
+                s00 += a * a;
+                s01 += a * b;
+                s11 += b * b;
+
+                sy0 += a * y;
+                sy1 += b * y;
+
+                ar_energy += y * y;
+            }
+
+            const double reg =
+                ar_energy * 1e-6 / count;
+
+            s00 += reg;
+            s11 += reg;
+
+            const double det =
+                s00 * s11 - s01 * s01;
+
+            if (std::fabs(det) > 1e-20) {
+
+                const double a1 =
+                    (sy0 * s11 - sy1 * s01) / det;
+
+                const double a2 =
+                    (sy1 * s00 - sy0 * s01) / det;
+
+                double prediction_error = 0.0;
+
+                for (int k = 2; k < count; ++k) {
+
+                    const double predicted =
+                        a1 * cur[k - 1] +
+                        a2 * cur[k - 2];
+
+                    const double e =
+                        cur[k] - predicted;
+
+                    prediction_error += e * e;
+                }
+
+                const double raw_tonality =
+                    1.0 -
+                    prediction_error /
+                    (ar_energy + eps);
+
+                tonality =
+                    std::clamp(
+                        (float)raw_tonality,
+                        0.0f,
+                        1.0f
+                    );
+            }
+        }
+
         const float cur_peak = max_v;
 
         float prev_peak = 0.0f;
 
-        for (float v : prev)
+        for (float v : prev) {
+
             prev_peak =
                 std::max(prev_peak, std::fabs(v));
+        }
 
         constexpr float PEAK_THRESHOLD = 0.01f;
 
@@ -202,12 +287,15 @@ inline std::vector<float> compute_channel_priority(
             0.55f * sparsity +
             0.20f * structure +
             0.20f * inter_scale +
+            0.65f * tonality +
             transient;
 
         p_val *= freq_weight[i];
 
-        p_val =
-            std::tanh(1.3f * p_val);
+        if (target_kbps >= 80.0f) {
+            p_val = 
+                std::tanh(1.3f * p_val);
+        }
 
         priority[i] = p_val;
     }
@@ -218,6 +306,7 @@ inline std::vector<float> compute_channel_priority(
         prev_priority = priority;
 
     for (int i = 0; i < band_count; ++i) {
+
         priority[i] =
             0.70f * priority[i] +
             0.30f * prev_priority[i];
@@ -232,6 +321,7 @@ inline std::vector<float> compute_channel_priority(
         sum += v;
 
     if (sum < eps) {
+
         std::fill(
             priority.begin(),
             priority.end(),

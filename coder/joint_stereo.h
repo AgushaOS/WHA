@@ -23,6 +23,16 @@ inline void ms_to_lr(const std::vector<float>& mid, const std::vector<float>& si
     }
 }
 
+inline void ms_to_lr_inplace(std::vector<float>& mid, std::vector<float>& side)
+{
+    size_t n = mid.size();
+    for (size_t i = 0; i < n; ++i) {
+        float m = mid[i], s = side[i];
+        mid[i]  = m + s;
+        side[i] = m - s;
+    }
+}
+
 inline int get_is_base_original(float target_kbps) {
     if (target_kbps < 64.0f)        return 1;
     else if (target_kbps < 96.0f)   return 1;
@@ -43,6 +53,15 @@ inline int get_is_start_from_base(int base, int total_bands) {
     base = std::clamp(base, 0, 16);
     int start = base * total_bands / 16;
     return std::clamp(start, 0, total_bands);
+}
+
+inline int get_is_segmented_threshold(float target_kbps, int total_bands) {
+    int base;
+    if (target_kbps < 96.0f)        base = 8;
+    else if (target_kbps < 160.0f)  base = 10;
+    else if (target_kbps < 192.0f)  base = 12;
+    else                            base = 16;
+    return base * total_bands / 16;
 }
 
 inline int get_r_bits(int band_idx) {
@@ -75,10 +94,11 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
                                      const std::vector<float>& right,
                                      std::vector<float>& Y,
                                      std::array<float, 4>& r_out,
-                                     std::array<bool, 4>& inv_flags, 
+                                     std::array<bool, 4>& inv_flags,
                                      bool& use_segmented,
                                      int band_idx,
-                                     int total_bands)
+                                     int total_bands,
+                                     int seg_threshold)
 {
     const size_t n = left.size();
     double eL_total = 0.0, eR_total = 0.0, dot_total = 0.0;
@@ -87,7 +107,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
         eR_total  += right[i] * right[i];
         dot_total += left[i]  * right[i];
     }
-    
+
     for (int s = 0; s < 4; ++s) inv_flags[s] = false;
 
     const double eps = 1e-12;
@@ -99,8 +119,8 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
         return;
     }
 
-    int segmented_threshold = 8 * total_bands / 16;
-    use_segmented = (band_idx < segmented_threshold);
+    (void)total_bands;
+    use_segmented = (band_idx < seg_threshold);
 
     if (use_segmented) {
         const int seg_size = (int)(n / 4);
@@ -109,29 +129,29 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
             int start = s * seg_size;
             int end = (s == 3) ? (int)n : start + seg_size;
             int len = end - start;
-            
+
             double seg_eL = 0.0, seg_eR = 0.0, seg_dot = 0.0;
             for (int i = start; i < end; ++i) {
                 seg_eL += left[i] * left[i];
                 seg_eR += right[i] * right[i];
                 seg_dot += left[i] * right[i];
             }
-            
+
             double seg_total = seg_eL + seg_eR;
             if (seg_total < eps) {
                 r_out[s] = 0.5f;
                 for (int i = start; i < end; ++i) Y[i] = 0.0f;
                 continue;
             }
-            
+
             double seg_corr = seg_dot / (std::sqrt(seg_eL * seg_eR) + eps);
             inv_flags[s] = (seg_corr < -0.2);
-            
+
             r_out[s] = static_cast<float>(seg_eR / seg_total);
             double sqrt_eL = std::sqrt(seg_eL);
             double sqrt_eR = std::sqrt(seg_eR);
             double inv_sqrt_total = 1.0 / std::sqrt(seg_total);
-            
+
             double eX = 0.0;
             std::vector<float> X_seg(len);
             for (int i = 0; i < len; ++i) {
@@ -141,7 +161,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
                 X_seg[i] = static_cast<float>(x);
                 eX += x * x;
             }
-            
+
             if (eX < eps) {
                 for (int i = start; i < end; ++i) Y[i] = 0.0f;
             } else {
@@ -156,15 +176,15 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
         use_segmented = false;
         double corr = dot_total / (std::sqrt(eL_total * eR_total) + eps);
         inv_flags[0] = (corr < -0.2);
-        
+
         float r = static_cast<float>(eR_total / total);
         for (int s = 0; s < 4; ++s) r_out[s] = r;
-        
+
         double sqrtE = std::sqrt(total);
         double sqrt_eL = std::sqrt(eL_total);
         double sqrt_eR = std::sqrt(eR_total);
         double inv_sqrt_total = 1.0 / std::sqrt(total);
-        
+
         std::vector<float> X(n);
         double eX = 0.0;
         for (size_t i = 0; i < n; ++i) {
@@ -173,7 +193,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
             X[i] = static_cast<float>(x);
             eX += x * x;
         }
-        
+
         if (eX < eps) {
             Y.assign(n, 0.0f);
         } else {
@@ -188,7 +208,7 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
 
 inline void apply_is(const std::vector<float>& Y,
                      const std::array<float, 4>& r_vals,
-                     const std::array<bool, 4>& inv_flags, 
+                     const std::array<bool, 4>& inv_flags,
                      bool use_segmented,
                      std::vector<float>& left,
                      std::vector<float>& right)
@@ -196,7 +216,7 @@ inline void apply_is(const std::vector<float>& Y,
     size_t n = Y.size();
     left.resize(n);
     right.resize(n);
-    
+
     if (use_segmented && n >= 16) {
         int seg_size = (int)(n / 4);
         for (int s = 0; s < 4; ++s) {
@@ -205,7 +225,7 @@ inline void apply_is(const std::vector<float>& Y,
             float gr = std::sqrt(r);
             int start = s * seg_size;
             int end = (s == 3) ? (int)n : start + seg_size;
-            
+
             bool local_inv = inv_flags[s];
             for (int i = start; i < end; ++i) {
                 left[i]  = Y[i] * gl;
@@ -220,6 +240,45 @@ inline void apply_is(const std::vector<float>& Y,
         for (size_t i = 0; i < n; ++i) {
             left[i]  = Y[i] * gl;
             right[i] = Y[i] * (local_inv ? -gr : gr);
+        }
+    }
+}
+
+inline void apply_is_inplace(std::vector<float>& Y_and_left,
+                             std::vector<float>& right_out,
+                             const std::array<float, 4>& r_vals,
+                             const std::array<bool, 4>& inv_flags,
+                             bool use_segmented)
+{
+    size_t n = Y_and_left.size();
+    right_out.resize(n);
+
+    if (use_segmented && n >= 16) {
+        int seg_size = (int)(n / 4);
+        for (int s = 0; s < 4; ++s) {
+            float r = r_vals[s];
+            float gl = std::sqrt(1.0f - r);
+            float gr = std::sqrt(r);
+            int start = s * seg_size;
+            int end = (s == 3) ? (int)n : start + seg_size;
+            bool local_inv = inv_flags[s];
+            float gr_signed = local_inv ? -gr : gr;
+            for (int i = start; i < end; ++i) {
+                float y = Y_and_left[i];
+                Y_and_left[i] = y * gl;
+                right_out[i]  = y * gr_signed;
+            }
+        }
+    } else {
+        float r = r_vals[0];
+        float gl = std::sqrt(1.0f - r);
+        float gr = std::sqrt(r);
+        bool local_inv = inv_flags[0];
+        float gr_signed = local_inv ? -gr : gr;
+        for (size_t i = 0; i < n; ++i) {
+            float y = Y_and_left[i];
+            Y_and_left[i] = y * gl;
+            right_out[i]  = y * gr_signed;
         }
     }
 }
@@ -296,23 +355,17 @@ inline bool should_use_is_band(const std::vector<float>& left,
     const double abs_correlation = std::abs(correlation);
     constexpr double IS_CORRELATION_THRESHOLD = 0.60;
     if (abs_correlation >= IS_CORRELATION_THRESHOLD) return true;
-    
+
     const double meanL = eL / (double)n;
     const double meanR = eR / (double)n;
     const double minE = std::min(meanL, meanR);
     const double maxE = std::max(meanL, meanR);
     const double ratio = maxE / (minE + eps);
     if (ratio > (double)strong_ratio_threshold) return true;
-    
-    double eM = 0.0, eS = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const double L = (double)left[i];
-        const double R = (double)right[i];
-        const double M = (L + R) * 0.5;
-        const double S = (L - R) * 0.5;
-        eM += M * M; eS += S * S;
-    }
-    const bool ms_benefit = use_mid_side((float)eL, (float)eR, (float)eM, (float)eS, enable_ms, target_kbps);
+
+    const double Em = (eL + eR + 2.0 * cross) * 0.25;
+    const double Es = (eL + eR - 2.0 * cross) * 0.25;
+    const bool ms_benefit = use_mid_side((float)eL, (float)eR, (float)Em, (float)Es, enable_ms, target_kbps);
     return ms_benefit || maxE >= minE * 4.0;
 }
 

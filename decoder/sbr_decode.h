@@ -32,6 +32,52 @@ struct SBRDecodeResult {
     bool                  used = false;
 };
 
+inline uint8_t sbr_read_huffman(BitReaderMSB& reader)
+{
+    uint32_t code = 0;
+
+    for (int len = 1; len <= 7; ++len) {
+        code = (code << 1) | reader.read_bits(1);
+
+        switch (len) {
+            case 1:
+                if (code == 0b0) return 0;
+                break;
+
+            case 3:
+                if (code == 0b101) return 7;
+                break;
+
+            case 4:
+                if (code == 0b1000) return 3;
+                if (code == 0b1100) return 14;
+                break;
+
+            case 5:
+                if (code == 0b11101) return 1;
+                if (code == 0b10010) return 4;
+                if (code == 0b11110) return 8;
+                if (code == 0b11100) return 11;
+                if (code == 0b11011) return 12;
+                if (code == 0b10011) return 13;
+                break;
+
+            case 6:
+                if (code == 0b111111) return 2;
+                if (code == 0b110100) return 5;
+                if (code == 0b111110) return 6;
+                break;
+
+            case 7:
+                if (code == 0b1101010) return 9;
+                if (code == 0b1101011) return 10;
+                break;
+        }
+    }
+
+    throw std::runtime_error("Invalid SBR Huffman code");
+}
+
 inline SBRDecodeResult sbr_decode_v23(BitReaderMSB& reader,
                                       const std::vector<uint8_t>& active0,
                                       int sbr_end, int expected_bands,
@@ -39,66 +85,170 @@ inline SBRDecodeResult sbr_decode_v23(BitReaderMSB& reader,
                                       const ModeState& pred_state)
 {
     SBRDecodeResult result;
+
     result.noise_flag.assign(expected_bands, false);
     result.rms.assign(expected_bands, 0.0f);
     result.rms_idx.assign(expected_bands, 0);
     result.shape_mask.assign(expected_bands, 0);
-    
+
     if (sbr_end <= 0) return result;
-    
+
     std::vector<int> indices;
+
     for (int i = 0; i < sbr_end; ++i) {
-        if (!active0[i]) indices.push_back(i);
+        if (!active0[i]) {
+            indices.push_back(i);
+        }
     }
+
     if (indices.empty()) return result;
-    
+
     result.indices = indices;
     result.used = true;
-    
+
+    // Noise flags
     for (int idx : indices) {
         bool bit = (reader.read_bits(1) != 0);
-        if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() && pred_state.prev_sbr_valid[idx]) {
-            bit = bit ^ (pred_state.prev_sbr_noise[idx] != 0);
+
+        if (can_state_pred &&
+            idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx])
+        {
+            bit ^= (pred_state.prev_sbr_noise[idx] != 0);
         }
+
         result.noise_flag[idx] = bit;
     }
-    
+
+    // Huffman shape masks
     for (int idx : indices) {
-        result.shape_mask[idx] = (uint8_t)reader.read_bits(4);
+        result.shape_mask[idx] = sbr_read_huffman(reader);
     }
-    
+
+    // RMS indices
     int k_sbr = (int)reader.read_bits(3);
-    auto sbr_vals = rice_decode(reader, (int)indices.size(), k_sbr);
-    
+
+    auto sbr_vals = rice_decode(
+        reader,
+        (int)indices.size(),
+        k_sbr
+    );
+
     if ((int)sbr_vals.size() != (int)indices.size()) {
         throw std::runtime_error("SBR RMS decode size mismatch");
     }
-    
+
     for (size_t j = 0; j < indices.size(); ++j) {
         int idx = indices[j];
+
         uint32_t val = sbr_vals[j];
+
         int sb = get_scale_bits(idx);
         int max_idx = (1 << sb) - 1;
+
         uint32_t rms_idx;
-        
-        if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() && pred_state.prev_sbr_valid[idx]) {
+
+        if (can_state_pred &&
+            idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx])
+        {
             int32_t d = zigzag_decode(val);
-            int64_t v = (int64_t)pred_state.prev_sbr_rms[idx] + d;
+
+            int64_t v =
+                (int64_t)pred_state.prev_sbr_rms[idx] + d;
+
             if (v < 0) v = 0;
             if (v > max_idx) v = max_idx;
+
             rms_idx = (uint32_t)v;
-        } else {
-            rms_idx = val;
-            if (rms_idx > (uint32_t)max_idx) rms_idx = max_idx;
         }
-        
+        else {
+            rms_idx = val;
+
+            if (rms_idx > (uint32_t)max_idx) {
+                rms_idx = max_idx;
+            }
+        }
+
         result.rms_idx[idx] = rms_idx;
-        float log_rms = SCALE_LOG_MIN + rms_idx * (SCALE_LOG_MAX - SCALE_LOG_MIN) / max_idx;
+
+        float log_rms =
+            SCALE_LOG_MIN +
+            rms_idx * (SCALE_LOG_MAX - SCALE_LOG_MIN) / max_idx;
+
         result.rms[idx] = exp10f(log_rms);
     }
-    
+
     return result;
 }
+
+// inline SBRDecodeResult sbr_decode_v23(BitReaderMSB& reader,
+//                                       const std::vector<uint8_t>& active0,
+//                                       int sbr_end, int expected_bands,
+//                                       bool can_state_pred,
+//                                       const ModeState& pred_state)
+// {
+//     SBRDecodeResult result;
+//     result.noise_flag.assign(expected_bands, false);
+//     result.rms.assign(expected_bands, 0.0f);
+//     result.rms_idx.assign(expected_bands, 0);
+//     result.shape_mask.assign(expected_bands, 0);
+    
+//     if (sbr_end <= 0) return result;
+    
+//     std::vector<int> indices;
+//     for (int i = 0; i < sbr_end; ++i) {
+//         if (!active0[i]) indices.push_back(i);
+//     }
+//     if (indices.empty()) return result;
+    
+//     result.indices = indices;
+//     result.used = true;
+    
+//     for (int idx : indices) {
+//         bool bit = (reader.read_bits(1) != 0);
+//         if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() && pred_state.prev_sbr_valid[idx]) {
+//             bit = bit ^ (pred_state.prev_sbr_noise[idx] != 0);
+//         }
+//         result.noise_flag[idx] = bit;
+//     }
+    
+//     for (int idx : indices) {
+//         result.shape_mask[idx] = (uint8_t)reader.read_bits(4);
+//     }
+    
+//     int k_sbr = (int)reader.read_bits(3);
+//     auto sbr_vals = rice_decode(reader, (int)indices.size(), k_sbr);
+    
+//     if ((int)sbr_vals.size() != (int)indices.size()) {
+//         throw std::runtime_error("SBR RMS decode size mismatch");
+//     }
+    
+//     for (size_t j = 0; j < indices.size(); ++j) {
+//         int idx = indices[j];
+//         uint32_t val = sbr_vals[j];
+//         int sb = get_scale_bits(idx);
+//         int max_idx = (1 << sb) - 1;
+//         uint32_t rms_idx;
+        
+//         if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() && pred_state.prev_sbr_valid[idx]) {
+//             int32_t d = zigzag_decode(val);
+//             int64_t v = (int64_t)pred_state.prev_sbr_rms[idx] + d;
+//             if (v < 0) v = 0;
+//             if (v > max_idx) v = max_idx;
+//             rms_idx = (uint32_t)v;
+//         } else {
+//             rms_idx = val;
+//             if (rms_idx > (uint32_t)max_idx) rms_idx = max_idx;
+//         }
+        
+//         result.rms_idx[idx] = rms_idx;
+//         float log_rms = SCALE_LOG_MIN + rms_idx * (SCALE_LOG_MAX - SCALE_LOG_MIN) / max_idx;
+//         result.rms[idx] = exp10f(log_rms);
+//     }
+    
+//     return result;
+// }
 
 inline SBRDecodeResult sbr_decode(const uint8_t* blk, size_t& ptr, size_t blk_size,
                                   const std::vector<uint8_t>& active0,
@@ -241,13 +391,25 @@ inline void sbr_synthesize(
         const float target_energy = target_rms * target_rms * N;
         ch0_bands[i].resize(N);
         
+        // if (sbr.noise_flag[i]) {
+        //     uint32_t seed = block_idx * 1000000u + (uint32_t)i * 137u + 1u;
+        //     for (int j = 0; j < N; ++j) {
+        //         seed = seed * 1664525u + 1013904223u;
+        //         ch0_bands[i][j] = (static_cast<float>(seed) / 2147483648.0f) - 1.0f;
+        //     }
+        // } 
+
         if (sbr.noise_flag[i]) {
             uint32_t seed = block_idx * 1000000u + (uint32_t)i * 137u + 1u;
+
+            const float amplitude = target_rms;
+
             for (int j = 0; j < N; ++j) {
                 seed = seed * 1664525u + 1013904223u;
-                ch0_bands[i][j] = (static_cast<float>(seed) / 2147483648.0f) - 1.0f;
+                ch0_bands[i][j] = (seed & 0x80000000u) ? amplitude : -amplitude;
             }
-        } else {
+        } 
+        else {
             int source_band = -1;
             float best_weight = -1.0f;
             const int IDEAL_DISTANCE = 2;
@@ -294,9 +456,13 @@ inline void sbr_synthesize(
             if (gain > 2) {
                 gain = 0;
             }
+            if (sbr.shape_mask[i] == 0) {
+                gain *= 1.1;
+            }
             for (int j = start; j < end; ++j) {
                 ch0_bands[i][j] *= gain;
             }
         }
     }
 }
+ 

@@ -98,7 +98,82 @@ inline SBREncodeResult sbr_analyze(
     return result;
 }
 
+inline void sbr_write_huffman(BitWriterMSB& writer, uint8_t mask)
+{
+    switch (mask) {
+        case 0:  writer.write_bits(0b0,       1); break;
+        case 1:  writer.write_bits(0b11101,   5); break;
+        case 2:  writer.write_bits(0b111111,  6); break;
+        case 3:  writer.write_bits(0b1000,    4); break;
+        case 4:  writer.write_bits(0b10010,   5); break;
+        case 5:  writer.write_bits(0b110100,  6); break;
+        case 6:  writer.write_bits(0b111110,  6); break;
+        case 7:  writer.write_bits(0b101,     3); break;
+        case 8:  writer.write_bits(0b11110,   5); break;
+        case 9:  writer.write_bits(0b1101010, 7); break;
+        case 10: writer.write_bits(0b1101011, 7); break;
+        case 11: writer.write_bits(0b11100,   5); break;
+        case 12: writer.write_bits(0b11011,   5); break;
+        case 13: writer.write_bits(0b10011,   5); break;
+        case 14: writer.write_bits(0b1100,    4); break;
+
+        default: writer.write_bits(0b0, 1); break;
+    }
+}
+
 inline void sbr_write_to_stream(BitWriterMSB& writer,
+                                const SBREncodeResult& sbr,
+                                const std::vector<int>& sbr_indices,
+                                bool can_state_pred,
+                                const ModeState& pred_state)
+{
+    if (sbr_indices.empty()) return;
+
+    for (int idx : sbr_indices) {
+        bool cur = sbr.noise_flag[idx];
+        bool write_bit = cur;
+
+        if (can_state_pred &&
+            idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx])
+        {
+            write_bit = cur ^ (pred_state.prev_sbr_noise[idx] != 0);
+        }
+
+        writer.write_bits(write_bit ? 1 : 0, 1);
+    }
+
+    for (int idx : sbr_indices) {
+        sbr_write_huffman(writer, sbr.shape_mask[idx]);
+    }
+
+    std::vector<uint32_t> sbr_vals;
+    sbr_vals.reserve(sbr_indices.size());
+
+    for (int idx : sbr_indices) {
+        uint32_t cur = sbr.rms_idx[idx];
+        uint32_t val = cur;
+
+        if (can_state_pred &&
+            idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx])
+        {
+            int32_t d = (int32_t)cur -
+                        (int32_t)pred_state.prev_sbr_rms[idx];
+
+            val = zigzag_encode(d);
+        }
+
+        sbr_vals.push_back(val);
+    }
+
+    int k_sbr = compute_optimal_rice_k(sbr_vals, 7);
+
+    writer.write_bits(k_sbr & 0x07, 3);
+    rice_encode(writer, sbr_vals, k_sbr);
+}
+
+inline void sbr_write_to_stream1(BitWriterMSB& writer,
                                 const SBREncodeResult& sbr,
                                 const std::vector<int>& sbr_indices,
                                 bool can_state_pred,
