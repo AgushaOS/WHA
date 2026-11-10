@@ -3,7 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
-#include <cstring> 
+#include <cstring>
 
 struct OverlapAddState {
     std::vector<float> accum;
@@ -53,24 +53,39 @@ inline void overlap_add_block(OverlapAddState& ola,
                               const std::vector<float>& window_sq,
                               int local_start)
 {
-    int ch = ola.num_channels;
-    size_t needed = (ola.head_offset + block_size) * ch;
+    const int ch = ola.num_channels;
+    const size_t needed = (size_t)(ola.head_offset + block_size) * ch;
     if (ola.accum.size() < needed) {
         ola.accum.resize(needed, 0.0f);
         ola.weight.resize(needed, 0.0f);
     }
 
-    float* accum_ptr = ola.accum.data();
+    float* accum_ptr  = ola.accum.data();
     float* weight_ptr = ola.weight.data();
-    const float* win_ptr = window.data();
+    const float* win_ptr    = window.data();
     const float* win_sq_ptr = window_sq.data();
 
-    for (int c = 0; c < ch; ++c) {
-        const float* src = recon_chs[c].data();
+    const float* src_ptrs[8];
+    if (ch <= 8) {
+        for (int c = 0; c < ch; ++c) src_ptrs[c] = recon_chs[c].data();
         for (int i = 0; i < block_size; ++i) {
-            int local_idx = (local_start + i) * ch + c;
-            accum_ptr[local_idx]  += src[i] * win_ptr[i];
-            weight_ptr[local_idx] += win_sq_ptr[i];
+            const float wv  = win_ptr[i];
+            const float wsq = win_sq_ptr[i];
+            const size_t base = (size_t)(local_start + i) * ch;
+            for (int c = 0; c < ch; ++c) {
+                accum_ptr [base + c] += src_ptrs[c][i] * wv;
+                weight_ptr[base + c] += wsq;
+            }
+        }
+    } else {
+        for (int i = 0; i < block_size; ++i) {
+            const float wv  = win_ptr[i];
+            const float wsq = win_sq_ptr[i];
+            const size_t base = (size_t)(local_start + i) * ch;
+            for (int c = 0; c < ch; ++c) {
+                accum_ptr [base + c] += recon_chs[c][i] * wv;
+                weight_ptr[base + c] += wsq;
+            }
         }
     }
 }
@@ -78,23 +93,24 @@ inline void overlap_add_block(OverlapAddState& ola,
 inline int extract_ready_samples(OverlapAddState& ola,
                                  std::vector<float>& write_buf)
 {
-    int ready = ola.current_pos - ola.output_pos;
+    const int ready = ola.current_pos - ola.output_pos;
     if (ready <= 0) return 0;
-    int ch = ola.num_channels;
-    
-    size_t offset = write_buf.size();
-    write_buf.resize(offset + ready * ch);
+    const int ch = ola.num_channels;
+
+    const size_t offset = write_buf.size();
+    write_buf.resize(offset + (size_t)ready * ch);
     float* out_ptr = write_buf.data() + offset;
-    
-    const float* accum_ptr = ola.accum.data();
+
+    const float* accum_ptr  = ola.accum.data();
     const float* weight_ptr = ola.weight.data();
+    const size_t start_elem = ola.head_offset * ch;
 
     for (int i = 0; i < ready; ++i) {
-        int local_idx = ((int)ola.head_offset + i) * ch;
+        const size_t local_idx = start_elem + (size_t)i * ch;
         for (int c = 0; c < ch; ++c) {
-            float w = weight_ptr[local_idx + c];
-            float val = (w > 1e-9f) ? (accum_ptr[local_idx + c] / w) : 0.0f;
-            out_ptr[i * ch + c] = val;
+            const float w = weight_ptr[local_idx + c];
+            const float v = (w > 1e-9f) ? (accum_ptr[local_idx + c] / w) : 0.0f;
+            out_ptr[(size_t)i * ch + c] = v;
         }
     }
     ola.head_offset += ready;
@@ -105,16 +121,23 @@ inline int extract_ready_samples(OverlapAddState& ola,
 inline void compact_ola_buffer(OverlapAddState& ola) {
     if (ola.head_offset == 0) return;
 
-    size_t ch = ola.num_channels;
-    size_t remove_elements = ola.head_offset * ch;
-    size_t total_elements = ola.accum.size();
-    size_t remaining = total_elements - remove_elements;
-
-    if (remaining > 0) {
-        std::memmove(ola.accum.data(), ola.accum.data() + remove_elements, remaining * sizeof(float));
-        std::memmove(ola.weight.data(), ola.weight.data() + remove_elements, remaining * sizeof(float));
+    const size_t ch = (size_t)ola.num_channels;
+    const size_t remove_elements = ola.head_offset * ch;
+    const size_t total_elements  = ola.accum.size();
+    if (remove_elements >= total_elements) {
+        ola.accum.clear();
+        ola.weight.clear();
+        ola.head_offset = 0;
+        return;
     }
-    
+    const size_t remaining = total_elements - remove_elements;
+
+    std::memmove(ola.accum.data(),
+                 ola.accum.data() + remove_elements,
+                 remaining * sizeof(float));
+    std::memmove(ola.weight.data(),
+                 ola.weight.data() + remove_elements,
+                 remaining * sizeof(float));
     ola.accum.resize(remaining);
     ola.weight.resize(remaining);
     ola.head_offset = 0;
@@ -123,23 +146,24 @@ inline void compact_ola_buffer(OverlapAddState& ola) {
 inline int extract_remaining(OverlapAddState& ola,
                              std::vector<float>& write_buf)
 {
-    int ch = ola.num_channels;
-    size_t remaining = ola.accum.size() / ch - ola.head_offset;
+    const int ch = ola.num_channels;
+    const size_t remaining = ola.accum.size() / ch - ola.head_offset;
     if (remaining == 0) return 0;
-    
-    size_t offset = write_buf.size();
+
+    const size_t offset = write_buf.size();
     write_buf.resize(offset + remaining * ch);
     float* out_ptr = write_buf.data() + offset;
-    
-    const float* accum_ptr = ola.accum.data();
+
+    const float* accum_ptr  = ola.accum.data();
     const float* weight_ptr = ola.weight.data();
+    const size_t start_elem = ola.head_offset * ch;
 
     for (size_t i = 0; i < remaining; ++i) {
-        size_t local_idx = (ola.head_offset + i) * ch;
+        const size_t local_idx = start_elem + i * ch;
         for (int c = 0; c < ch; ++c) {
-            float w = weight_ptr[local_idx + c];
-            float val = (w > 1e-9f) ? (accum_ptr[local_idx + c] / w) : 0.0f;
-            out_ptr[i * ch + c] = val;
+            const float w = weight_ptr[local_idx + c];
+            const float v = (w > 1e-9f) ? (accum_ptr[local_idx + c] / w) : 0.0f;
+            out_ptr[i * ch + c] = v;
         }
     }
     return (int)remaining;

@@ -31,19 +31,6 @@ inline DualAllocResult allocate_bits_dual(
     const int n = static_cast<int>(priority0.size());
     const float eps = 1e-12f;
 
-    if (target_kbps / (stereo ? 2 : 1) < 64) { 
-        // for (auto& x : energy1) {
-        //     x *= 0.7;
-        // }
-        // if (target_kbps / (stereo ? 2 : 1) < 48) {
-        // }
-
-        // for (int64_t i = energy0.size() / 2; i < energy0.size(); i++) {
-        //     energy0[i] *= 0.25;
-        // }
-
-    }
-
     for (auto& x : max_bits_in) {
         x = 8;
     }
@@ -80,19 +67,8 @@ inline DualAllocResult allocate_bits_dual(
                     bits1[0] = 4; 
                 }
             } else {
-                // if (target_kbps >= 0) { 
                 bits0[0] = 4;
                 bits1[0] = 4;
-                // }
-                // bits0[0] = 4;
-                // bits1[0] = 3;
-                // if (energy0[0] > energy1[0]) {
-                //     bits0[0] = 4;
-                //     // bits1[0] = 3;
-                // } else {
-                //     // bits0[0] = 4;
-                //     bits1[0] = 4; 
-                // }
             }
         } else {
             if (energy0[0] > energy1[0]) {
@@ -118,8 +94,6 @@ inline DualAllocResult allocate_bits_dual(
         s2_1[i] = energy1[i] * inv;
         float sp0 = 0.5f * priority0[i];
         float sp1 = 0.5f * priority1[i];
-        // if (i > 0) { sp0 += 0.25f * priority0[i-1]; sp1 += 0.25f * priority1[i-1]; }
-        // if (i < n-1) { sp0 += 0.25f * priority0[i+1]; sp1 += 0.25f * priority1[i+1]; }
         factor0[i] = s2_0[i] * std::pow(std::max(sp0, eps), 0.6f);
         factor1[i] = s2_1[i] * std::pow(std::max(sp1, eps), 0.6f);
         global_score[i] = (factor0[i] + factor1[i]) * std::sqrt((float)coeff_counts[i]);
@@ -201,15 +175,6 @@ inline DualAllocResult allocate_bits_dual(
         std::min(reservoir_max, reservoir + (total_bits_budget - used_bits)) :
         std::max(0, reservoir - (used_bits - total_bits_budget));
 
-    // std::cout << "CH0 : \n";
-    // for (auto x : bits0) {
-    //     std::cout << x << ' ';
-    // }
-    // std::cout << "\nCH1 : \n";
-    // for (auto x : bits1) {
-    //     std::cout << x << ' ';
-    // }
-    // std::cout << '\n';
     return { bits0, bits1, used_bits, new_reservoir };
 }
 

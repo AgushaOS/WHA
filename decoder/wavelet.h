@@ -149,33 +149,6 @@ private:
         return perm;
     }
 
-    void apply_temporal_dither(
-        std::vector<float>& pcm,
-        float kbps_per_channel) const
-    {
-        if (kbps_per_channel > 96.0f)
-            return;
-
-        const float AMPLITUDE = 3e-5f;
-
-        uint32_t seed = (uint32_t)bi * 1000000u + 1u;
-
-        for (size_t i = 0; i < pcm.size(); ++i) {
-            seed = seed * 1664525u + 1013904223u;
-            float rand1 =
-                static_cast<float>(seed) / 4294967296.0f;
-
-            seed = seed * 1664525u + 1013904223u;
-            float rand2 =
-                static_cast<float>(seed) / 4294967296.0f;
-
-            float dither =
-                (rand1 + rand2 - 1.0f) * AMPLITUDE;
-
-            pcm[i] += dither;
-        }
-    }
-
 public:
     std::vector<float> iwpt(
         std::vector<std::vector<float>>& subbands,
@@ -218,14 +191,6 @@ public:
 
         std::vector<float> pcm =
             wpt_reconstruct(subbands, levels);
-
-        const float kbps_per_channel =
-            target_kbps / float(channels);
-
-        // apply_temporal_dither(
-        //     pcm,
-        //     kbps_per_channel
-        // );
 
         return pcm;
     }

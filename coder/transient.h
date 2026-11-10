@@ -171,14 +171,28 @@ inline bool detect_strong_transient(const std::vector<float>& energy0,
     int band_count, bool stereo, float threshold)
 {
     if (band_count < 3) return false;
-    float total = 0.0f, high = 0.0f;
-    int   high_start = band_count / 4;
+
+    float total = 0.0f, high = 0.0f, bass = 0.0f;
+
+    const int high_start = band_count / 4;
+    const int bass_end = band_count / 8;
+
     for (int i = 0; i < band_count; ++i) {
         float e = energy0[i] + (stereo ? energy1[i] : 0.0f);
+
         total += e;
+
         if (i >= high_start)
             high += e;
+
+        if (i < bass_end)
+            bass += e;
     }
+
     if (total < 1e-12f) return false;
-    return ((high / total) > 0.15f);
+
+    const float high_ratio = high / total;
+    const float bass_ratio = bass / total;
+
+    return high_ratio > 0.15f && bass_ratio < 0.65f;
 }

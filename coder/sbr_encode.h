@@ -17,9 +17,8 @@ inline void get_sbr_shape_weights(uint8_t mask, float w0, float w1, float out[4]
         v[i] = (mask & (1 << i)) ? w1 : w0;
         sum += v[i];
     }
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 4; ++i)
         out[i] = v[i] / sum;
-    }
 }
 
 struct SBREncodeResult {
@@ -41,60 +40,69 @@ inline SBREncodeResult sbr_analyze(
     result.shape_mask.assign(band_count, 0);
     result.sbr_end = sbr_end;
 
+    float sum_by_pop[5];
+    for (int p = 0; p <= 4; ++p)
+        sum_by_pop[p] = w0 * (float)(4 - p) + w1 * (float)p;
+
+    float w_all[16][4];
+    for (int m = 0; m < 16; ++m) {
+        const int pc = __builtin_popcount((unsigned)m);
+        const float inv_s = 1.0f / sum_by_pop[pc];
+        for (int b = 0; b < 4; ++b)
+            w_all[m][b] = ((m >> b) & 1) ? (w1 * inv_s) : (w0 * inv_s);
+    }
+
     const float eps = 1e-12f;
     for (int i = 0; i < sbr_end; ++i) {
         if (active0[i]) continue;
         const auto& orig = ch0_original[i];
         if (orig.empty()) continue;
-        
-        int N = orig.size();
-        int seg_size = N / 4;
-        
-        float seg_energy[4] = {0, 0, 0, 0};
+
+        const int N = (int)orig.size();
+        const int seg_size = N / 4;
+
+        float seg_energy[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         for (int s = 0; s < 4; ++s) {
-            int start = s * seg_size;
-            int end = (s == 3) ? N : (s + 1) * seg_size;
-            for (int j = start; j < end; ++j) {
-                seg_energy[s] += orig[j] * orig[j];
-            }
+            const int start = s * seg_size;
+            const int end   = (s == 3) ? N : (s + 1) * seg_size;
+            float e = 0.0f;
+            for (int j = start; j < end; ++j) e += orig[j] * orig[j];
+            seg_energy[s] = e;
         }
-        float total_e = seg_energy[0] + seg_energy[1] + seg_energy[2] + seg_energy[3] + eps;
+        const float total_e = seg_energy[0] + seg_energy[1] + seg_energy[2] + seg_energy[3] + eps;
         float target_p[4];
-        for(int s = 0; s < 4; ++s) target_p[s] = seg_energy[s] / total_e;
-        
+        for (int s = 0; s < 4; ++s)
+            target_p[s] = seg_energy[s] / total_e;
+
         float best_err = 1e9f;
         uint8_t best_mask = 0;
-        for (uint8_t m = 0; m < 16; ++m) {
-            float w[4];
-            get_sbr_shape_weights(m, w0, w1, w);
+        for (int m = 0; m < 16; ++m) {
             float err = 0.0f;
-            for(int s = 0; s < 4; ++s) {
-                float diff = target_p[s] - w[s];
+            for (int s = 0; s < 4; ++s) {
+                const float diff = target_p[s] - w_all[m][s];
                 err += diff * diff;
             }
             if (err < best_err) {
                 best_err = err;
-                best_mask = m;
+                best_mask = (uint8_t)m;
             }
         }
         result.shape_mask[i] = best_mask;
 
-        // std::cout << int64_t(best_mask) << ' ';        
-        double sum_sq  = 0.0;
-        float  max_abs = 0.0f;
+        double sum_sq = 0.0;
+        float max_abs = 0.0f;
         for (float v : orig) {
             sum_sq += static_cast<double>(v) * v;
-            float av = std::abs(v);
+            const float av = fabsf(v);
             if (av > max_abs) max_abs = av;
         }
-        float rms   = std::sqrt(static_cast<float>(sum_sq / N) + eps);
-        float crest = max_abs / (rms + eps);
-        
+        const float rms   = sqrtf(static_cast<float>(sum_sq / N) + eps);
+        const float crest = max_abs / (rms + eps);
+
         result.noise_flag[i] = (crest < 3.5f);
-        int sb = get_scale_bits(i);
+        const int sb = get_scale_bits(i);
         result.rms_idx[i] = get_scale_idx(rms, sb);
     }
-    // std::cout << '\n';
     return result;
 }
 
@@ -116,8 +124,7 @@ inline void sbr_write_huffman(BitWriterMSB& writer, uint8_t mask)
         case 12: writer.write_bits(0b11011,   5); break;
         case 13: writer.write_bits(0b10011,   5); break;
         case 14: writer.write_bits(0b1100,    4); break;
-
-        default: writer.write_bits(0b0, 1); break;
+        default: writer.write_bits(0b0,       1); break;
     }
 }
 
@@ -130,45 +137,37 @@ inline void sbr_write_to_stream(BitWriterMSB& writer,
     if (sbr_indices.empty()) return;
 
     for (int idx : sbr_indices) {
-        bool cur = sbr.noise_flag[idx];
+        const bool cur = sbr.noise_flag[idx];
         bool write_bit = cur;
-
         if (can_state_pred &&
             idx < (int)pred_state.prev_sbr_valid.size() &&
             pred_state.prev_sbr_valid[idx])
         {
             write_bit = cur ^ (pred_state.prev_sbr_noise[idx] != 0);
         }
-
         writer.write_bits(write_bit ? 1 : 0, 1);
     }
 
-    for (int idx : sbr_indices) {
+    for (int idx : sbr_indices)
         sbr_write_huffman(writer, sbr.shape_mask[idx]);
-    }
 
     std::vector<uint32_t> sbr_vals;
     sbr_vals.reserve(sbr_indices.size());
 
     for (int idx : sbr_indices) {
-        uint32_t cur = sbr.rms_idx[idx];
+        const uint32_t cur = sbr.rms_idx[idx];
         uint32_t val = cur;
-
         if (can_state_pred &&
             idx < (int)pred_state.prev_sbr_valid.size() &&
             pred_state.prev_sbr_valid[idx])
         {
-            int32_t d = (int32_t)cur -
-                        (int32_t)pred_state.prev_sbr_rms[idx];
-
+            const int32_t d = (int32_t)cur - (int32_t)pred_state.prev_sbr_rms[idx];
             val = zigzag_encode(d);
         }
-
         sbr_vals.push_back(val);
     }
 
-    int k_sbr = compute_optimal_rice_k(sbr_vals, 7);
-
+    const int k_sbr = compute_optimal_rice_k(sbr_vals, 7);
     writer.write_bits(k_sbr & 0x07, 3);
     rice_encode(writer, sbr_vals, k_sbr);
 }
@@ -182,31 +181,32 @@ inline void sbr_write_to_stream1(BitWriterMSB& writer,
     if (sbr_indices.empty()) return;
 
     for (int idx : sbr_indices) {
-        bool cur = sbr.noise_flag[idx];
+        const bool cur = sbr.noise_flag[idx];
         bool write_bit = cur;
-        if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() && pred_state.prev_sbr_valid[idx]) {
+        if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx]) {
             write_bit = cur ^ (pred_state.prev_sbr_noise[idx] != 0);
         }
         writer.write_bits(write_bit ? 1 : 0, 1);
     }
 
-    for (int idx : sbr_indices) {
+    for (int idx : sbr_indices)
         writer.write_bits(sbr.shape_mask[idx], 4);
-    }
 
     std::vector<uint32_t> sbr_vals;
     sbr_vals.reserve(sbr_indices.size());
     for (int idx : sbr_indices) {
-        uint32_t cur = sbr.rms_idx[idx];
+        const uint32_t cur = sbr.rms_idx[idx];
         uint32_t val = cur;
-        if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() && pred_state.prev_sbr_valid[idx]) {
-            int32_t d = (int32_t)cur - (int32_t)pred_state.prev_sbr_rms[idx];
+        if (can_state_pred && idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx]) {
+            const int32_t d = (int32_t)cur - (int32_t)pred_state.prev_sbr_rms[idx];
             val = zigzag_encode(d);
         }
         sbr_vals.push_back(val);
     }
-    
-    int k_sbr = compute_optimal_rice_k(sbr_vals, 7);
-    writer.write_bits(k_sbr & 0x07, 3); 
+
+    const int k_sbr = compute_optimal_rice_k(sbr_vals, 7);
+    writer.write_bits(k_sbr & 0x07, 3);
     rice_encode(writer, sbr_vals, k_sbr);
 }
