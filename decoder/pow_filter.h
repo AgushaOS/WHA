@@ -11,7 +11,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-inline float fast_powf(float x, float y) {
+inline float powf(float x, float y) {
     if (x <= 0.0f) return 0.0f;
     return std::exp2f(y * std::log2f(x));
 }
@@ -157,71 +157,123 @@ private:
     std::vector<float> win_sq_;
 
     void processFrameInPlace(float* frame) {
-        for (int i = 0; i < NFFT; ++i) in_[i] = frame[i] * win_[i];
+        constexpr float EPS = 1e-20f;
+        constexpr float EPS_SQ = EPS * EPS;
+
+        constexpr float INV_GAMMA = 1.1764705882352941f;
+        constexpr float SHAPE_EXPONENT = INV_GAMMA * 0.5f;
+
+        constexpr float VALLEY_EXPONENT = 1.5f;
+        constexpr int NUM_SUBBANDS = 32;
+
+        for (int i = 0; i < NFFT; ++i)
+            in_[i] = frame[i] * win_[i];
+
         fftwf_execute(r2c_);
 
-        alignas(32) float orig_mag[NBINS];
-        float max_mag = 1e-20f; 
+        alignas(32) float mag[NBINS];
+        alignas(32) float band_levels[NUM_SUBBANDS];
+
+        float max_mag_sq = 0.0f;
+
         for (int i = 0; i < NBINS; ++i) {
             const float re = out_c_[i][0];
             const float im = out_c_[i][1];
-            const float m = std::sqrt(re * re + im * im);
-            orig_mag[i] = m;
-            if (m > max_mag) max_mag = m;
+
+            const float mag_sq = re * re + im * im;
+
+            if (mag_sq > max_mag_sq)
+                max_mag_sq = mag_sq;
         }
+
+        float max_mag = EPS;
+
+        if (max_mag_sq > EPS_SQ)
+            max_mag = std::sqrt(max_mag_sq);
 
         max_mag *= max_mag_multiplier_;
 
-        alignas(32) float mag[NBINS];
-        std::memcpy(mag, orig_mag, sizeof(mag));
+        const float inv_max_sq = 1.0f / (max_mag * max_mag);
 
-        const float inv_max = 1.0f / max_mag;
-        constexpr float INV_GAMMA = 1.1764705882352941f; 
         for (int i = 0; i < NBINS; ++i) {
-            float n = mag[i] * inv_max;
-            n = fast_powf(n, INV_GAMMA); 
-            mag[i] = n * max_mag;
+            const float re = out_c_[i][0];
+            const float im = out_c_[i][1];
+
+            const float mag_sq = re * re + im * im;
+
+            if (mag_sq > EPS_SQ) {
+                const float normalized_sq = mag_sq * inv_max_sq;
+
+                mag[i] = powf(
+                    normalized_sq, SHAPE_EXPONENT
+                ) * max_mag;
+            } else {
+                mag[i] = 0.0f;
+            }
         }
 
         if (apply_subband_enhancement_) {
-            constexpr int NUM_SUBBANDS = 32;
-            constexpr float VALLEY_STRENGTH = 0.5f;
-            constexpr float VALLEY_EXPONENT = 1.0f + VALLEY_STRENGTH;
-            alignas(32) float enhanced[NBINS];
             const int base_size = NBINS / NUM_SUBBANDS;
             const int remainder = NBINS % NUM_SUBBANDS;
+
             int offset = 0;
+
             for (int band = 0; band < NUM_SUBBANDS; ++band) {
-                const int band_size = base_size + (band < remainder ? 1 : 0);
-                const int begin = offset;
-                const int end = begin + band_size;
-                offset = end;
-                if (band_size <= 0) continue;
+                const int size =
+                    base_size + (band < remainder ? 1 : 0);
+
                 float sum = 0.0f;
-                for (int i = begin; i < end; ++i) sum += mag[i];
-                const float level = sum / static_cast<float>(band_size);
-                if (level <= 1e-20f) {
-                    for (int i = begin; i < end; ++i) enhanced[i] = mag[i];
-                    continue;
-                }
-                for (int i = begin; i < end; ++i) {
-                    const float x = mag[i] > 0.0f ? mag[i] : 0.0f;
-                    if (x < level) {
-                        const float ratio = x / level;
-                        enhanced[i] = level * fast_powf(ratio, VALLEY_EXPONENT); 
-                    } else {
-                        enhanced[i] = x;
+
+                for (int j = 0; j < size; ++j)
+                    sum += mag[offset + j];
+
+                band_levels[band] =
+                    sum / static_cast<float>(size);
+
+                offset += size;
+            }
+
+            offset = 0;
+
+            for (int band = 0; band < NUM_SUBBANDS; ++band) {
+                const int size =
+                    base_size + (band < remainder ? 1 : 0);
+
+                if (band < 16) {
+                    const float level = band_levels[band];
+
+                    if (level > EPS) {
+                        for (int j = 0; j < size; ++j) {
+                            const int i = offset + j;
+
+                            const float x =
+                                mag[i] > 0.0f ? mag[i] : 0.0f;
+
+                            if (x < level) {
+                                mag[i] = level * powf(
+                                    x / level, VALLEY_EXPONENT
+                                );
+                            }
+                        }
                     }
                 }
+
+                offset += size;
             }
-            std::memcpy(mag, enhanced, sizeof(mag));
         }
 
         for (int i = 0; i < NBINS; ++i) {
-            if (orig_mag[i] > 1e-20f) {
-                const float scale = mag[i] / orig_mag[i];
-                in_c2r_[i][0] = out_c_[i][0] * scale;
-                in_c2r_[i][1] = out_c_[i][1] * scale;
+            const float re = out_c_[i][0];
+            const float im = out_c_[i][1];
+
+            const float mag_sq = re * re + im * im;
+
+            if (mag_sq > EPS_SQ) {
+                const float orig_mag = std::sqrt(mag_sq);
+                const float scale = mag[i] / orig_mag;
+
+                in_c2r_[i][0] = re * scale;
+                in_c2r_[i][1] = im * scale;
             } else {
                 in_c2r_[i][0] = 0.0f;
                 in_c2r_[i][1] = 0.0f;
@@ -230,8 +282,10 @@ private:
 
         fftwf_execute(c2r_);
 
-        constexpr float norm = 1.0f / (float)NFFT;
-        for (int i = 0; i < NFFT; ++i) frame[i] = out_[i] * norm * win_[i];
+        constexpr float norm = 1.0f / static_cast<float>(NFFT);
+
+        for (int i = 0; i < NFFT; ++i)
+            frame[i] = out_[i] * norm * win_[i];
     }
 
     void ensureAcc(ChannelState& cs, int64_t end_pos) {

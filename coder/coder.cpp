@@ -128,8 +128,8 @@ I/O:
   --max-blocks <n>             Stop after n blocks (debug)
 
 Logging:
-  --quiet, -q                  Suppress progress
-  --verbose, -v                Verbose (default)
+  --quiet, -q                  Suppress progress (Default)
+  --verbose, -v                Verbose 
   --help, -h                   Show this help
 
 Examples:
