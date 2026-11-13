@@ -18,13 +18,13 @@ inline float percentile85_abs(const std::vector<float>& arr) {
     return tmp[idx];
 }
 
-inline float compute_powerlaw_deadzone(float step, float rms) {
+inline float compute_powerlaw_deadzone(float step, float rms, float target_kbps) {
     if (step < 1e-12f)
         return 0.0f;
 
     float energy_ratio = rms / step;
     float mult = 0.55f + 0.10f * std::log2f(1.0f + energy_ratio);
-    mult = std::clamp(mult, 0.50f, 0.70f);
+    mult = std::clamp(mult, 0.50f, 0.75f);
 
     return mult * step;
 }
@@ -62,8 +62,8 @@ inline QuantResult quantize_levels(
 
     float deadzone_scale = 1.0f;
 
-    if (target_kbps > 192.0f) {
-        float t = (target_kbps - 192.0f) / (320.0f - 192.0f);
+    if (target_kbps > 64.0f) {
+        float t = (target_kbps - 96.0f) / (320.0f - 96.0f);
         t = std::clamp(t, 0.0f, 1.0f);
         deadzone_scale = 1.0f - std::pow(t, 1.5f);
     }
@@ -175,7 +175,8 @@ inline QuantResult quantize_levels(
             block_deadzones[b] =
                 compute_powerlaw_deadzone(
                     step,
-                    effective_rms
+                    effective_rms,
+                    target_kbps
                 ) * deadzone_scale;
         }
 
@@ -242,6 +243,24 @@ inline QuantResult quantize_levels(
 
         quantized_per_level[l] = std::move(quantized);
     }
+
+    // for (auto x : quantized_per_level) {
+    //     bool f = 0;
+    //     for (auto y : x) {
+    //         f |= (y != 0);
+    //     }
+        
+    //     for (auto y : x) {
+    //         f &= (std::abs(y) < 3);
+    //     }
+
+    //     if (f) {
+    //         for (auto y : x) {
+    //         std::cout << y << ' ';
+    //         }
+    //     }
+    //     std::cout << '\n';
+    // }
 
     return { std::move(scales), std::move(quantized_per_level) };
 }

@@ -31,13 +31,60 @@
 float SBR_W0 = 1.0f;
 float SBR_W1 = 9.0f;
 
+static const int IS_TBL_LO = -7;
+static const int IS_TBL_HI =  7;
+static const int IS_TBL_N  = 15;
+static const int IS_TBL_SLOTS = 8;
+
+static const uint16_t IS_TBL_CODE[IS_TBL_SLOTS][IS_TBL_N] = {
+    { 0x681, 0x683, 0x0D1, 0x035, 0x00C, 0x003, 0x000, 0x002,
+      0x007, 0x002, 0x01B, 0x069, 0x1A1, 0x680, 0x682 },
+    { 0, 0, 0, 0, 0x034, 0x01B, 0x007, 0x000,
+      0x002, 0x00C, 0x035, 0, 0, 0, 0 },
+    { 0, 0, 0, 0x013, 0x001, 0x005, 0x007, 0x001,
+      0x006, 0x000, 0x008, 0x012, 0, 0, 0 },
+    { 0, 0, 0, 0, 0x004, 0x003, 0x006, 0x002,
+      0x001, 0x007, 0x000, 0x005, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0, 0x00D, 0x000,
+      0x001, 0x002, 0x007, 0x00C, 0, 0, 0 },
+    { 0, 0, 0x009, 0x003, 0x002, 0x000, 0x006, 0x007,
+      0x005, 0, 0, 0x008, 0, 0, 0 },
+    { 0, 0, 0, 0x01C, 0x006, 0x000, 0x001, 0x002,
+      0x00F, 0x01D, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0x000, 0x001, 0x005, 0x003,
+      0x001, 0x004, 0x001, 0, 0, 0, 0 },
+};
+
+static const uint8_t IS_TBL_LEN[IS_TBL_SLOTS][IS_TBL_N] = {
+    { 11, 11, 8, 6, 4, 3, 2, 2, 3, 3, 5, 7, 9, 11, 11 },
+    {  0,  0, 0, 0, 6, 5, 3, 1, 2, 4, 6, 0, 0,  0,  0 },
+    {  0,  0, 0, 5, 3, 3, 3, 2, 3, 3, 4, 5, 0,  0,  0 },
+    {  0,  0, 0, 0, 5, 4, 3, 2, 2, 3, 3, 5, 0,  0,  0 },
+    {  0,  0, 0, 0, 0, 0, 4, 2, 2, 2, 3, 4, 0,  0,  0 },
+    {  0,  0, 5, 3, 2, 2, 3, 3, 4, 0, 0, 5, 0,  0,  0 },
+    {  0,  0, 0, 5, 3, 2, 2, 2, 4, 5, 0, 0, 0,  0,  0 },
+    {  0,  0, 0, 0, 4, 3, 3, 2, 2, 3, 4, 0, 0,  0,  0 },
+};
+
+static inline int decode_is_coeff_with_table(BitReaderMSB& r, int table_idx)
+{
+    uint32_t c = 0;
+    for (int len = 1; len <= 11; ++len) {
+        c = (c << 1) | r.read_bits(1);
+        for (int k = 0; k < IS_TBL_N; ++k) {
+            if (IS_TBL_LEN[table_idx][k] == len && IS_TBL_CODE[table_idx][k] == c)
+                return k + IS_TBL_LO;
+        }
+    }
+    throw std::runtime_error("Invalid Huffman code for IS coeff");
+}
+
 static const uint16_t IS_INV_HUFF_CODE[16] = {
     0x1, 0x0, 0x5, 0x6, 0x4, 0x19, 0x1B, 0x9,
     0x7, 0x1A, 0x18, 0x1F, 0x5, 0x1E, 0x8, 0x0E
 };
 static const uint8_t IS_INV_HUFF_LEN[16] = {
-    1, 3, 4, 5, 4, 6, 6, 6,
-    4, 6, 6, 7, 5, 7, 6, 6
+    1, 3, 4, 5, 4, 6, 6, 6, 4, 6, 6, 7, 5, 7, 6, 6
 };
 
 static const uint16_t ACTIVE_HUFF_CODE[16] = {
@@ -45,7 +92,7 @@ static const uint16_t ACTIVE_HUFF_CODE[16] = {
     0x01E, 0x0F8, 0x00E, 0x003, 0x0F9, 0x002, 0x002, 0x001
 };
 static const uint8_t ACTIVE_HUFF_LEN[16] = {
-    2, 5, 6, 5, 12, 11, 8, 3, 10, 13, 9, 6, 13, 7, 6, 1
+    2,  5,  6,  5, 12, 11, 8,  3, 10, 13, 9,  6, 13, 7,  6,  1
 };
 
 static const uint16_t MODE_MS_HUFF_CODE[16] = {
@@ -111,6 +158,17 @@ static inline int huffman_decode_mode_ms(BitReaderMSB& r) {
     throw std::runtime_error("Invalid Huffman code for mode_ms");
 }
 
+static inline int decode_huffman_small(BitReaderMSB& r) {
+    if (r.read_bits(1) != 0) return 0;        
+    if (r.read_bits(1) == 0) return 1;        
+    if (r.read_bits(1) != 0) return -1;       
+    return r.read_bits(1) ? -2 : 2;          
+}
+
+static inline void decode_huffman_small_vec(BitReaderMSB& r, int32_t* out, int n) {
+    for (int i = 0; i < n; ++i) out[i] = decode_huffman_small(r);
+}
+
 struct DecoderOptions {
     std::string input_wha;
     std::string output_wav;
@@ -130,9 +188,7 @@ Arguments:
 Options:
   --output <path>              Output WAV (default: <input>.wav)
   --buffer <samples>           Write batch size (default 8192, max 65536)
-  --sbr-weights <w0> <w1>      Override SBR weights (v29 files or experiments).
-                               For v30+ files, SBR weights are read from
-                               the container header automatically.
+  --sbr-weights <w0> <w1>      Override SBR weights
   --help, -h                   Show this help
 )";
 }
@@ -195,8 +251,8 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
     uint32_t block_count = read_u32(f);
     float    target_kbps = read_f32(f);
     uint8_t  block_format_version = read_u8(f);
-    if (block_format_version < 18 || block_format_version > 29)
-        throw std::runtime_error("Unsupported block format version (only v18-v29)");
+    if (block_format_version < 18 || block_format_version > 31)
+        throw std::runtime_error("Unsupported block format version (only v18-v31)");
 
     uint32_t total_frames = 0;
     if (version >= 21) total_frames = read_u32(f);
@@ -609,24 +665,48 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
         for (int i = 0; i < expected_band_count; ++i) {
             quant0[i].clear();
             if (!active0[i]) continue;
-            if (k_idx0 >= (int)k_sub_vals0.size()) throw std::runtime_error("k_sub_vals0 OOB");
-            int k_sub = k_sub_vals0[k_idx0++]; if (k_sub > 7) k_sub = 7;
-            auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_sub);
-            if ((int)uvals.size() != band_shapes[i]) throw std::runtime_error("uvals size mismatch ch0");
-            quant0[i].resize(uvals.size());
-            for (size_t j = 0; j < uvals.size(); ++j) quant0[i][j] = zigzag_decode(uvals[j]);
+            if (k_idx0 >= (int)k_sub_vals0.size())
+                throw std::runtime_error("k_sub_vals0 OOB");
+            uint32_t sym = k_sub_vals0[k_idx0++];
+
+            if (block_format_version >= 31 && sym == 0) {
+                quant0[i].resize(band_shapes[i]);
+                decode_huffman_small_vec(payload_reader, quant0[i].data(), band_shapes[i]);
+            } else {
+                int k_rice = (block_format_version >= 31) ? ((int)sym - 1) : (int)sym;
+                if (k_rice < 0) throw std::runtime_error("Invalid k_rice");
+                if (k_rice > 7) k_rice = 7;
+                auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_rice);
+                if ((int)uvals.size() != band_shapes[i])
+                    throw std::runtime_error("uvals size mismatch ch0");
+                quant0[i].resize(uvals.size());
+                for (size_t j = 0; j < uvals.size(); ++j)
+                    quant0[i][j] = zigzag_decode(uvals[j]);
+            }
         }
         if (stereo) {
             int k_idx1 = 0;
             for (int i = 0; i < expected_band_count; ++i) {
                 quant1[i].clear();
                 if (!active1[i]) continue;
-                if (k_idx1 >= (int)k_sub_vals1.size()) throw std::runtime_error("k_sub_vals1 OOB");
-                int k_sub = k_sub_vals1[k_idx1++]; if (k_sub > 7) k_sub = 7;
-                auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_sub);
-                if ((int)uvals.size() != band_shapes[i]) throw std::runtime_error("uvals size mismatch ch1");
-                quant1[i].resize(uvals.size());
-                for (size_t j = 0; j < uvals.size(); ++j) quant1[i][j] = zigzag_decode(uvals[j]);
+                if (k_idx1 >= (int)k_sub_vals1.size())
+                    throw std::runtime_error("k_sub_vals1 OOB");
+                uint32_t sym = k_sub_vals1[k_idx1++];
+
+                if (block_format_version >= 31 && sym == 0) {
+                    quant1[i].resize(band_shapes[i]);
+                    decode_huffman_small_vec(payload_reader, quant1[i].data(), band_shapes[i]);
+                } else {
+                    int k_rice = (block_format_version >= 31) ? ((int)sym - 1) : (int)sym;
+                    if (k_rice < 0) throw std::runtime_error("Invalid k_rice");
+                    if (k_rice > 7) k_rice = 7;
+                    auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_rice);
+                    if ((int)uvals.size() != band_shapes[i])
+                        throw std::runtime_error("uvals size mismatch ch1");
+                    quant1[i].resize(uvals.size());
+                    for (size_t j = 0; j < uvals.size(); ++j)
+                        quant1[i][j] = zigzag_decode(uvals[j]);
+                }
             }
         }
 
@@ -696,22 +776,43 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
                             for (int s = 0; s < 4; ++s) is_inv[idx][s] = inv_val;
                         }
                     }
-                    int k_is = (int)payload_reader.read_bits(3);
-                    auto is_zz_vals = rice_decode(payload_reader, (size_t)total_vals, k_is);
-                    if ((int)is_zz_vals.size() != total_vals) throw std::runtime_error("IS Rice size mismatch");
-                    int val_idx = 0;
-                    for (int idx : is_indices) {
-                        int bits = get_r_bits(idx);
-                        if (idx < segmented_threshold) {
-                            is_use_segmented[idx] = true;
-                            for (int s = 0; s < 4; ++s) {
-                                int32_t q = zigzag_decode(is_zz_vals[val_idx++]);
-                                is_r[idx][s] = dequantize_r_centered(q, bits);
+
+                    if (block_format_version >= 30) {
+                        int table_idx = (int)payload_reader.read_bits(3);
+                        if (table_idx >= IS_TBL_SLOTS)
+                            throw std::runtime_error("Invalid IS table index");
+                        for (int idx : is_indices) {
+                            int bits = get_r_bits(idx);
+                            if (idx < segmented_threshold) {
+                                is_use_segmented[idx] = true;
+                                for (int s = 0; s < 4; ++s) {
+                                    int sym = decode_is_coeff_with_table(payload_reader, table_idx);
+                                    is_r[idx][s] = dequantize_r_centered(sym, bits);
+                                }
+                            } else {
+                                is_use_segmented[idx] = false;
+                                int sym = decode_is_coeff_with_table(payload_reader, table_idx);
+                                is_r[idx].fill(dequantize_r_centered(sym, bits));
                             }
-                        } else {
-                            is_use_segmented[idx] = false;
-                            int32_t q = zigzag_decode(is_zz_vals[val_idx++]);
-                            is_r[idx].fill(dequantize_r_centered(q, bits));
+                        }
+                    } else {
+                        int k_is = (int)payload_reader.read_bits(3);
+                        auto is_zz_vals = rice_decode(payload_reader, (size_t)total_vals, k_is);
+                        if ((int)is_zz_vals.size() != total_vals) throw std::runtime_error("IS Rice size mismatch");
+                        int val_idx = 0;
+                        for (int idx : is_indices) {
+                            int bits = get_r_bits(idx);
+                            if (idx < segmented_threshold) {
+                                is_use_segmented[idx] = true;
+                                for (int s = 0; s < 4; ++s) {
+                                    int32_t q = zigzag_decode(is_zz_vals[val_idx++]);
+                                    is_r[idx][s] = dequantize_r_centered(q, bits);
+                                }
+                            } else {
+                                is_use_segmented[idx] = false;
+                                int32_t q = zigzag_decode(is_zz_vals[val_idx++]);
+                                is_r[idx].fill(dequantize_r_centered(q, bits));
+                            }
                         }
                     }
                 }

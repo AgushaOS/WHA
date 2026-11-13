@@ -333,13 +333,131 @@ inline bool use_mid_side(float El, float Er, float Em, float Es,
     return prod_ms < prod_lr * 0.95f;
 }
 
+inline bool use_mid_side(float El, float Er, float Em, float Es,
+                         bool enable_ms, float target_kbps,
+                         bool low_band)
+{
+    if (!enable_ms)
+        return false;
+
+    constexpr float eps = 1e-12f;
+
+    const float prod_lr = El * Er;
+    const float prod_ms = Em * Es;
+
+    const float side_mid = Es / (Em + eps);
+    const float gain = prod_lr / (prod_ms + eps);
+
+    if (low_band)
+    {
+        if (side_mid > 0.20f)
+            return false;
+
+        if (gain < 1.5f)
+            return false;
+
+        return true;
+    }
+
+    if (target_kbps < 64.0f)
+    {
+        if (Es > Em * 0.9f)
+            return false;
+
+        if (prod_ms > prod_lr * 1.05f)
+            return false;
+
+        return true;
+    }
+
+    const float min_e = std::min(El, Er);
+    const float max_e = std::max(El, Er);
+
+    const float energy_ratio = max_e / (min_e + eps);
+
+    if (energy_ratio > 4.0f)
+        return false;
+
+    if (Es > Em * 0.5f)
+        return false;
+
+    return prod_ms < prod_lr * 0.95f;
+}
+
+
 inline bool should_use_is_band(const std::vector<float>& left,
                                const std::vector<float>& right,
                                bool enable_ms,
                                float target_kbps,
                                float strong_ratio_threshold,
                                float equal_ratio_threshold,
-                               float equal_ratio_threshold_low_bitrate)
+                               float equal_ratio_threshold_low_bitrate,
+                               float idx,
+                               float band_count)
+{
+    const size_t n = std::min(left.size(), right.size());
+    if (n == 0) return false;
+
+    const double eps = 1e-12;
+    double eL = 0.0, eR = 0.0, cross = 0.0;
+
+    for (size_t i = 0; i < n; ++i) {
+        const double L = (double)left[i];
+        const double R = (double)right[i];
+
+        eL += L * L;
+        eR += R * R;
+        cross += L * R;
+    }
+
+    if (eL + eR < eps) return false;
+
+    const double correlation =
+        cross / (std::sqrt(eL * eR) + eps);
+
+    const double abs_correlation = std::abs(correlation);
+
+    const double meanL = eL / (double)n;
+    const double meanR = eR / (double)n;
+
+    const double minE = std::min(meanL, meanR);
+    const double maxE = std::max(meanL, meanR);
+
+    const double ratio = maxE / (minE + eps);
+
+    const double Em = (eL + eR + 2.0 * cross) * 0.25;
+    const double Es = (eL + eR - 2.0 * cross) * 0.25;
+
+
+    constexpr double IS_CORRELATION_THRESHOLD = 0.60;
+
+    if (abs_correlation >= IS_CORRELATION_THRESHOLD)
+        return true;
+
+    if (ratio > (double)strong_ratio_threshold)
+        return true;
+
+    const bool ms_benefit = use_mid_side(
+        (float)eL,
+        (float)eR,
+        (float)Em,
+        (float)Es,
+        enable_ms,
+        target_kbps
+    );
+
+    return !ms_benefit && maxE >= minE * 4.0;
+}
+
+inline bool should_use_is_band1(const std::vector<float>& left,
+                               const std::vector<float>& right,
+                               bool enable_ms,
+                               float target_kbps,
+                               float strong_ratio_threshold,
+                               float equal_ratio_threshold,
+                               float equal_ratio_threshold_low_bitrate,
+                               float idx,
+                               float band_count)
 {
     const size_t n = std::min(left.size(), right.size());
     if (n == 0) return false;
@@ -376,6 +494,7 @@ inline int32_t quantize_r_centered(float r, int bits) {
     int steps = (1 << (bits - 1)) - 1;
     float step_size = theta_center / steps;
     int32_t q = (int32_t)std::round((theta - theta_center) / step_size);
+    // std::cout << std::clamp(q, -steps, steps) << ' ';
     return std::clamp(q, -steps, steps);
 }
 

@@ -13,6 +13,7 @@
 #include <array>
 #include <tuple>
 #include <memory>
+#include <climits>
 #include <sys/resource.h>
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
@@ -37,26 +38,75 @@
 float SBR_W0 = 1.0f;
 float SBR_W1 = 9.0f;
 
+static const int IS_TBL_LO = -7;
+static const int IS_TBL_HI =  7;
+static const int IS_TBL_N  = 15;
+static const int IS_TBL_SLOTS = 8;
+
+static const uint16_t IS_TBL_CODE[IS_TBL_SLOTS][IS_TBL_N] = {
+    { 0x681, 0x683, 0x0D1, 0x035, 0x00C, 0x003, 0x000, 0x002,
+      0x007, 0x002, 0x01B, 0x069, 0x1A1, 0x680, 0x682 },
+    { 0, 0, 0, 0, 0x034, 0x01B, 0x007, 0x000,
+      0x002, 0x00C, 0x035, 0, 0, 0, 0 },
+    { 0, 0, 0, 0x013, 0x001, 0x005, 0x007, 0x001,
+      0x006, 0x000, 0x008, 0x012, 0, 0, 0 },
+    { 0, 0, 0, 0, 0x004, 0x003, 0x006, 0x002,
+      0x001, 0x007, 0x000, 0x005, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0, 0x00D, 0x000,
+      0x001, 0x002, 0x007, 0x00C, 0, 0, 0 },
+    { 0, 0, 0x009, 0x003, 0x002, 0x000, 0x006, 0x007,
+      0x005, 0, 0, 0x008, 0, 0, 0 },
+    { 0, 0, 0, 0x01C, 0x006, 0x000, 0x001, 0x002,
+      0x00F, 0x01D, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0x000, 0x001, 0x005, 0x003,
+      0x001, 0x004, 0x001, 0, 0, 0, 0 },
+};
+
+static const uint8_t IS_TBL_LEN[IS_TBL_SLOTS][IS_TBL_N] = {
+    { 11, 11, 8, 6, 4, 3, 2, 2, 3, 3, 5, 7, 9, 11, 11 },
+    {  0,  0, 0, 0, 6, 5, 3, 1, 2, 4, 6, 0, 0,  0,  0 },
+    {  0,  0, 0, 5, 3, 3, 3, 2, 3, 3, 4, 5, 0,  0,  0 },
+    {  0,  0, 0, 0, 5, 4, 3, 2, 2, 3, 3, 5, 0,  0,  0 },
+    {  0,  0, 0, 0, 0, 0, 4, 2, 2, 2, 3, 4, 0,  0,  0 },
+    {  0,  0, 5, 3, 2, 2, 3, 3, 4, 0, 0, 5, 0,  0,  0 },
+    {  0,  0, 0, 5, 3, 2, 2, 2, 4, 5, 0, 0, 0,  0,  0 },
+    {  0,  0, 0, 0, 4, 3, 3, 2, 2, 3, 4, 0, 0,  0,  0 },
+};
+
+static int select_best_is_table(const std::vector<int>& syms)
+{
+    int best_table = 0;
+    int best_cost  = INT_MAX;
+    for (int t = 0; t < IS_TBL_SLOTS; ++t) {
+        bool can_encode = true;
+        int  cost = 0;
+        for (int sym : syms) {
+            int s = std::clamp(sym, IS_TBL_LO, IS_TBL_HI);
+            int idx = s - IS_TBL_LO;
+            uint8_t len = IS_TBL_LEN[t][idx];
+            if (len == 0) { can_encode = false; break; }
+            cost += len;
+        }
+        if (!can_encode) continue;
+        if (cost < best_cost) { best_cost = cost; best_table = t; }
+    }
+    return best_table;
+}
+
 static const uint16_t IS_INV_HUFF_CODE[16] = {
     0x1, 0x0, 0x5, 0x6, 0x4, 0x19, 0x1B, 0x9,
     0x7, 0x1A, 0x18, 0x1F, 0x5, 0x1E, 0x8, 0x0E
 };
 static const uint8_t IS_INV_HUFF_LEN[16] = {
-    1, 3, 4, 5, 4, 6, 6, 6,
-    4, 6, 6, 7, 5, 7, 6, 6
+    1, 3, 4, 5, 4, 6, 6, 6, 4, 6, 6, 7, 5, 7, 6, 6
 };
 
 static const uint16_t ACTIVE_HUFF_CODE[16] = {
-    0x001, 0x002, 0x000, 0x003,
-    0x07D, 0x03F, 0x006, 0x001,
-    0x01E, 0x0F8, 0x00E, 0x003,
-    0x0F9, 0x002, 0x002, 0x001
+    0x001, 0x002, 0x000, 0x003, 0x07D, 0x03F, 0x006, 0x001,
+    0x01E, 0x0F8, 0x00E, 0x003, 0x0F9, 0x002, 0x002, 0x001
 };
 static const uint8_t ACTIVE_HUFF_LEN[16] = {
-    2,  5,  6,  5,
-    12, 11, 8,  3,
-    10, 13, 9,  6,
-    13, 7,  6,  1
+    2,  5,  6,  5, 12, 11, 8,  3, 10, 13, 9,  6, 13, 7,  6,  1
 };
 
 static const uint16_t MODE_MS_HUFF_CODE[16] = {
@@ -64,9 +114,55 @@ static const uint16_t MODE_MS_HUFF_CODE[16] = {
     0x01, 0x09, 0x08, 0x0B, 0x0E, 0x05, 0x03, 0x01
 };
 static const uint8_t MODE_MS_HUFF_LEN[16] = {
-    2, 5, 6, 6, 6, 7, 7, 7,
-    4, 6, 6, 6, 6, 7, 6, 1
+    2, 5, 6, 6, 6, 7, 7, 7, 4, 6, 6, 6, 6, 7, 6, 1
 };
+
+static const uint8_t HUFF_SMALL_LEN_TBL[5]  = { 4, 3, 1, 2, 4 };
+static const uint32_t HUFF_SMALL_CODE_TBL[5] = { 0x5u, 0x3u, 0x1u, 0x0u, 0x4u };
+
+static inline int huffman_small_len(int32_t v) {
+    int idx = v + 2;
+    return ((unsigned)idx > 4u) ? -1 : (int)HUFF_SMALL_LEN_TBL[idx];
+}
+
+static inline void write_huffman_small(BitWriterMSB& w, int32_t v) {
+    int idx = v + 2;
+    if ((unsigned)idx > 4u)
+        throw std::runtime_error("WPT Huffman-small: value out of range");
+    w.write_bits(HUFF_SMALL_CODE_TBL[idx], HUFF_SMALL_LEN_TBL[idx]);
+}
+
+static inline void write_huffman_small_batch4(BitWriterMSB& w,
+                                              int32_t v0, int32_t v1,
+                                              int32_t v2, int32_t v3)
+{
+    int i0 = v0 + 2, i1 = v1 + 2, i2 = v2 + 2, i3 = v3 + 2;
+    if ((unsigned)i0 > 4u || (unsigned)i1 > 4u ||
+        (unsigned)i2 > 4u || (unsigned)i3 > 4u)
+        throw std::runtime_error("WPT Huffman-small: value out of range");
+
+    int l0 = HUFF_SMALL_LEN_TBL[i0];
+    int l1 = HUFF_SMALL_LEN_TBL[i1];
+    int l2 = HUFF_SMALL_LEN_TBL[i2];
+    int l3 = HUFF_SMALL_LEN_TBL[i3];
+
+    uint32_t code = HUFF_SMALL_CODE_TBL[i0];
+    code = (code << l1) | HUFF_SMALL_CODE_TBL[i1];
+    code = (code << l2) | HUFF_SMALL_CODE_TBL[i2];
+    code = (code << l3) | HUFF_SMALL_CODE_TBL[i3];
+    w.write_bits(code, l0 + l1 + l2 + l3);
+}
+
+static inline void write_huffman_small_vec(BitWriterMSB& w,
+                                           const std::vector<int32_t>& qv)
+{
+    const size_t n = qv.size();
+    size_t j = 0;
+    for (; j + 4 <= n; j += 4)
+        write_huffman_small_batch4(w, qv[j], qv[j+1], qv[j+2], qv[j+3]);
+    for (; j < n; ++j)
+        write_huffman_small(w, qv[j]);
+}
 
 struct CLIOptions {
     std::string input_file;
@@ -74,17 +170,17 @@ struct CLIOptions {
 
     float    target_kbps   = SETTINGS.default_target_kbps;
     size_t   read_buffer   = 8192;
-    int      is_base       = -1;     
+    int      is_base       = -1;
     float    sbr_w0        = 1.0f;
     float    sbr_w1        = 9.0f;
-    bool     speed_mode    = false;   
+    bool     speed_mode    = false;
 
-    int      block_mode    = 0;       
+    int      block_mode    = 0;
     bool     enable_ms     = true;
     bool     enable_is     = true;
     bool     enable_sbr    = true;
 
-    uint32_t max_blocks    = 0;        
+    uint32_t max_blocks    = 0;
     bool     verbose       = false;
 };
 
@@ -107,20 +203,12 @@ Block mode:
 Stereo tools:
   --no-ms                      Disable mid/side for regular (low) bands
   --no-is                      Disable intensity stereo for high bands
-                               (recommended at very low bitrates if phase issues)
-
-SBR:
   --no-sbr                     Disable SBR high-frequency continuation
   --sbr-weights <w0> <w1>      SBR spectral shape weights (default 1 9).
-                               Contrast = 20*log10(w1/w0) dB. Stored in file.
-
-Adaptive IS base:
-  --is-base <n>                -1 = adaptive (default), 0 = disabled,
-                               >0 = fixed base band
+  --is-base <n>                -1 = adaptive (default), 0 = disabled, >0 = fixed
 
 Preprocessing:
   --speed, --no-pow            Disable POW preprocessing (faster encode).
-                               Stored in file; decoder auto-detects.
 
 I/O:
   --read-buffer <samples>      I/O chunk size (default 8192)
@@ -129,13 +217,8 @@ I/O:
 
 Logging:
   --quiet, -q                  Suppress progress (Default)
-  --verbose, -v                Verbose 
+  --verbose, -v                Verbose
   --help, -h                   Show this help
-
-Examples:
-  encoder music.wav --bitrate 96 --no-is
-  encoder speech.wav --bitrate 32 --long-only --no-sbr -q
-  encoder drum.wav --bitrate 128 --short-only --sbr-weights 1 12
 )";
 }
 
@@ -152,7 +235,6 @@ static bool parse_encoder_args(int argc, char** argv, CLIOptions& o)
             if (i + 1 >= argc) { std::cerr << "Option " << what << " requires a value\n"; return false; }
             return true;
         };
-
         if      (a == "--help" || a == "-h") { print_help_encoder(); return false; }
         else if (a == "--bitrate")    { if(!need("--bitrate")) return false; o.target_kbps = std::stof(argv[++i]); }
         else if (a == "--read-buffer"){ if(!need("--read-buffer")) return false; o.read_buffer = std::stoul(argv[++i]); if (o.read_buffer < 256) o.read_buffer = 256; }
@@ -322,7 +404,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                         left_coeffs[i], right_coeffs[i], enable_ms, target_kbps,
                         SETTINGS.is_strong_ratio_threshold,
                         SETTINGS.is_equal_ratio_threshold,
-                        SETTINGS.is_equal_ratio_threshold_low_bitrate);
+                        SETTINGS.is_equal_ratio_threshold_low_bitrate, i, band_count);
                 }
                 if (choose_is) {
                     is_band[i] = 1; mode_ms[i] = 1;
@@ -535,50 +617,92 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     if (stereo) rice_encode(payload_writer, scale_vals1, k_scale1);
 
     std::vector<uint32_t> k_sub_vals0, k_sub_vals1;
-    std::vector<int> k_sub_per_band0(band_count, 0), k_sub_per_band1(band_count, 0);
+    std::vector<int> k_rice0(band_count, 0), k_rice1(band_count, 0);
+    std::vector<uint8_t> use_huff0(band_count, 0), use_huff1(band_count, 0);
     std::vector<std::vector<uint32_t>> uvals0(band_count), uvals1(band_count);
-    k_sub_vals0.reserve(band_count);
-    if (stereo) k_sub_vals1.reserve(band_count);
+
+    auto decide_band = [&](const std::vector<int32_t>& qvals,
+                           std::vector<uint32_t>& uv,
+                           int& k_rice_out) -> bool {
+        const size_t n = qvals.size();
+        uv.resize(n);
+        for (size_t j = 0; j < n; ++j) uv[j] = zigzag_encode(qvals[j]);
+        int k_rice = compute_optimal_rice_k(uv);
+        if (k_rice > 6) k_rice = 6;
+        k_rice_out = k_rice;
+
+        bool can_huff = true;
+        int  huff_bits = 0;
+        for (size_t j = 0; j < n; ++j) {
+            int idx = qvals[j] + 2;
+            if ((unsigned)idx > 4u) { can_huff = false; break; }
+            huff_bits += HUFF_SMALL_LEN_TBL[idx];
+        }
+        if (!can_huff) return false;
+
+        int rice_bits = 0;
+        for (size_t j = 0; j < n; ++j)
+            rice_bits += (int)(uv[j] >> k_rice) + 1 + k_rice;
+        return huff_bits < rice_bits;
+    };
 
     for (int i = 0; i < band_count; ++i) {
-        if (active0[i] && bits0[i] > 0) {
-            const auto& qvals = qres0.quantized_per_level[i];
-            auto& uv = uvals0[i]; uv.resize(qvals.size());
-            for (size_t j = 0; j < qvals.size(); ++j) uv[j] = zigzag_encode(qvals[j]);
-            int k_sub = compute_optimal_rice_k(uv);
-            k_sub_per_band0[i] = k_sub; k_sub_vals0.push_back(k_sub);
+        if (active0[i]) {
+            int k_rice = 0;
+            bool use_h = decide_band(qres0.quantized_per_level[i], uvals0[i], k_rice);
+            k_rice0[i] = k_rice;
+            if (use_h) {
+                use_huff0[i] = 1;
+                k_sub_vals0.push_back(0);
+            } else {
+                k_sub_vals0.push_back((uint32_t)(k_rice + 1));
+            }
         }
-        if (stereo && active1[i] && bits1[i] > 0) {
-            const auto& qvals = qres1.quantized_per_level[i];
-            auto& uv = uvals1[i]; uv.resize(qvals.size());
-            for (size_t j = 0; j < qvals.size(); ++j) uv[j] = zigzag_encode(qvals[j]);
-            int k_sub = compute_optimal_rice_k(uv);
-            k_sub_per_band1[i] = k_sub; k_sub_vals1.push_back(k_sub);
+        if (stereo && active1[i]) {
+            int k_rice = 0;
+            bool use_h = decide_band(qres1.quantized_per_level[i], uvals1[i], k_rice);
+            k_rice1[i] = k_rice;
+            if (use_h) {
+                use_huff1[i] = 1;
+                k_sub_vals1.push_back(0);
+            } else {
+                k_sub_vals1.push_back((uint32_t)(k_rice + 1));
+            }
         }
     }
 
     int k_sub_k0 = k_sub_vals0.empty() ? 0 : std::min(compute_optimal_rice_k(k_sub_vals0), 3);
-    int k_sub_k1 = 0;
-    if (stereo && !k_sub_vals1.empty()) k_sub_k1 = std::min(compute_optimal_rice_k(k_sub_vals1), 3);
+    int k_sub_k1 = (stereo && !k_sub_vals1.empty())
+                   ? std::min(compute_optimal_rice_k(k_sub_vals1), 3) : 0;
 
-    payload_writer.write_bits(k_sub_k0, 2);
-    if (stereo) payload_writer.write_bits(k_sub_k1, 2);
-    rice_encode(payload_writer, k_sub_vals0, k_sub_k0);
-    if (stereo) rice_encode(payload_writer, k_sub_vals1, k_sub_k1);
+    payload_writer.write_bits((uint32_t)k_sub_k0, 2);
+    if (stereo) payload_writer.write_bits((uint32_t)k_sub_k1, 2);
+    if (!k_sub_vals0.empty()) rice_encode(payload_writer, k_sub_vals0, k_sub_k0);
+    if (stereo && !k_sub_vals1.empty()) rice_encode(payload_writer, k_sub_vals1, k_sub_k1);
 
-    for (int i = 0; i < band_count; ++i)
-        if (active0[i] && bits0[i] > 0) rice_encode(payload_writer, uvals0[i], k_sub_per_band0[i]);
+    for (int i = 0; i < band_count; ++i) {
+        if (!active0[i]) continue;
+        if (use_huff0[i]) {
+            write_huffman_small_vec(payload_writer, qres0.quantized_per_level[i]);
+        } else {
+            rice_encode(payload_writer, uvals0[i], k_rice0[i]);
+        }
+    }
     if (stereo) {
-        for (int i = 0; i < band_count; ++i)
-            if (active1[i] && bits1[i] > 0) rice_encode(payload_writer, uvals1[i], k_sub_per_band1[i]);
+        for (int i = 0; i < band_count; ++i) {
+            if (!active1[i]) continue;
+            if (use_huff1[i]) {
+                write_huffman_small_vec(payload_writer, qres1.quantized_per_level[i]);
+            } else {
+                rice_encode(payload_writer, uvals1[i], k_rice1[i]);
+            }
+        }
     }
 
     if (use_is) {
         std::vector<int> is_indices;
         for (int i = 0; i < band_count; ++i) if (is_band[i]) is_indices.push_back(i);
         if (!is_indices.empty()) {
-            int total_vals = 0;
-            for (int idx : is_indices) total_vals += (idx < is_seg_threshold) ? 4 : 1;
             for (int i : is_indices) {
                 if (i < is_seg_threshold) {
                     int nibble = 0;
@@ -588,19 +712,26 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                     payload_writer.write_bits(is_inv_flags[i][0] ? 1u : 0u, 1);
                 }
             }
-            std::vector<uint32_t> is_zz_vals; is_zz_vals.reserve(total_vals);
+            std::vector<int> coeff_syms;
+            coeff_syms.reserve(is_indices.size() * 4);
             for (int i : is_indices) {
                 int bits = get_r_bits(i);
                 if (is_use_segmented[i]) {
-                    for (int s = 0; s < 4; ++s)
-                        is_zz_vals.push_back(zigzag_encode(quantize_r_centered(is_r_vals[i][s], bits)));
+                    for (int s = 0; s < 4; ++s) {
+                        int sym = quantize_r_centered(is_r_vals[i][s], bits);
+                        coeff_syms.push_back(std::clamp(sym, IS_TBL_LO, IS_TBL_HI));
+                    }
                 } else {
-                    is_zz_vals.push_back(zigzag_encode(quantize_r_centered(is_r_vals[i][0], bits)));
+                    int sym = quantize_r_centered(is_r_vals[i][0], bits);
+                    coeff_syms.push_back(std::clamp(sym, IS_TBL_LO, IS_TBL_HI));
                 }
             }
-            int k_is = compute_optimal_rice_k(is_zz_vals);
-            payload_writer.write_bits(k_is & 0x07, 3);
-            rice_encode(payload_writer, is_zz_vals, k_is);
+            int best_table = select_best_is_table(coeff_syms);
+            payload_writer.write_bits((uint32_t)best_table, 3);
+            for (int sym : coeff_syms) {
+                int idx = sym - IS_TBL_LO;
+                payload_writer.write_bits(IS_TBL_CODE[best_table][idx], IS_TBL_LEN[best_table][idx]);
+            }
         }
     }
 
@@ -676,7 +807,8 @@ void save_compressed_buffered(
     uint8_t ch = (uint8_t)num_channels; f.write((char*)&ch, 1);
     uint32_t block_count = (uint32_t)blocks.size(); f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 29; f.write((char*)&block_format_version, 1);
+    uint8_t block_format_version = 31;
+    f.write((char*)&block_format_version, 1);
     f.write((char*)&total_frames, 4);
 
     std::vector<uint8_t> write_buffer;
@@ -697,7 +829,7 @@ void save_compressed_buffered(
 
     int long_blocks = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v30 to " << path << " ("
+    std::cout << "Saved container v30/block v31 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no")
@@ -892,8 +1024,7 @@ compress_audio_streaming(const std::string& input_path, const CLIOptions& opts)
     drwav_uninit(&wav);
 
     uint32_t frames_out = (opts.max_blocks > 0 && blocks_raw.size() >= opts.max_blocks)
-                          ? 0u
-                          : (uint32_t)current_pos;
+                          ? 0u : (uint32_t)current_pos;
 
     return {
         std::move(blocks_raw),
