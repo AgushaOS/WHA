@@ -23,6 +23,7 @@
 #include "sbr_decode.h"
 #include "overlap_add.h"
 #include "pow_filter.h"
+#include "table.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -66,19 +67,6 @@ static const uint8_t IS_TBL_LEN[IS_TBL_SLOTS][IS_TBL_N] = {
     {  0,  0, 0, 0, 4, 3, 3, 2, 2, 3, 4, 0, 0,  0,  0 },
 };
 
-static inline int decode_is_coeff_with_table(BitReaderMSB& r, int table_idx)
-{
-    uint32_t c = 0;
-    for (int len = 1; len <= 11; ++len) {
-        c = (c << 1) | r.read_bits(1);
-        for (int k = 0; k < IS_TBL_N; ++k) {
-            if (IS_TBL_LEN[table_idx][k] == len && IS_TBL_CODE[table_idx][k] == c)
-                return k + IS_TBL_LO;
-        }
-    }
-    throw std::runtime_error("Invalid Huffman code for IS coeff");
-}
-
 static const uint16_t IS_INV_HUFF_CODE[16] = {
     0x1, 0x0, 0x5, 0x6, 0x4, 0x19, 0x1B, 0x9,
     0x7, 0x1A, 0x18, 0x1F, 0x5, 0x1E, 0x8, 0x0E
@@ -102,6 +90,8 @@ static const uint16_t MODE_MS_HUFF_CODE[16] = {
 static const uint8_t MODE_MS_HUFF_LEN[16] = {
     2, 5, 6, 6, 6, 7, 7, 7, 4, 6, 6, 6, 6, 7, 6, 1
 };
+
+static const int WPT_HUFF_SLOT_MAP[8] = { 0, 1, 2, 4, 5, 6, 7, 8 };
 
 struct SymCode { uint16_t code; uint8_t sym; };
 
@@ -130,43 +120,160 @@ static const SymCode IS_INV_BY_LEN[8][8] = {
 };
 static const int IS_INV_COUNT[8] = {0,1,0,1,3,2,7,2};
 
+static int16_t g_active_lut  [1 << 14];                
+static int16_t g_mode_ms_lut [1 <<  8];                
+static int16_t g_is_inv_lut  [1 <<  8];                
+static int16_t g_is_coeff_lut[IS_TBL_SLOTS][1 << 12]; 
+
+static void build_huffman_luts()
+{
+    static bool built = false;
+    if (built) return;
+    built = true;
+    constexpr int16_t NONE = INT16_MIN;
+
+    std::fill(g_active_lut, g_active_lut + (1 << 14), NONE);
+    for (int len = 1; len <= 13; ++len) {
+        int base = (1 << len) - 2;
+        for (int k = 0; k < ACTIVE_COUNT[len]; ++k)
+            g_active_lut[base + (int)ACTIVE_BY_LEN[len][k].code] =
+                (int16_t)ACTIVE_BY_LEN[len][k].sym;
+    }
+
+    std::fill(g_mode_ms_lut, g_mode_ms_lut + (1 << 8), NONE);
+    for (int len = 1; len <= 7; ++len) {
+        int base = (1 << len) - 2;
+        for (int k = 0; k < MODE_MS_COUNT[len]; ++k)
+            g_mode_ms_lut[base + (int)MODE_MS_BY_LEN[len][k].code] =
+                (int16_t)MODE_MS_BY_LEN[len][k].sym;
+    }
+
+    std::fill(g_is_inv_lut, g_is_inv_lut + (1 << 8), NONE);
+    for (int len = 1; len <= 7; ++len) {
+        int base = (1 << len) - 2;
+        for (int k = 0; k < IS_INV_COUNT[len]; ++k)
+            g_is_inv_lut[base + (int)IS_INV_BY_LEN[len][k].code] =
+                (int16_t)IS_INV_BY_LEN[len][k].sym;
+    }
+
+    for (int t = 0; t < IS_TBL_SLOTS; ++t) {
+        std::fill(g_is_coeff_lut[t], g_is_coeff_lut[t] + (1 << 12), NONE);
+        for (int k = 0; k < IS_TBL_N; ++k) {
+            int len = IS_TBL_LEN[t][k];
+            if (len == 0) continue;
+            int base = (1 << len) - 2;
+            g_is_coeff_lut[t][base + (int)IS_TBL_CODE[t][k]] =
+                (int16_t)(k + IS_TBL_LO);
+        }
+    }
+}
+
+static inline int decode_is_coeff_with_table(BitReaderMSB& r, int table_idx)
+{
+    uint32_t c = 0;
+    const int16_t* lut = g_is_coeff_lut[table_idx];
+    for (int len = 1; len <= 11; ++len) {
+        c = (c << 1) | r.read_bits(1);
+        int16_t s = lut[((1 << len) - 2) + (int)c];
+        if (s != INT16_MIN) return s;
+    }
+    throw std::runtime_error("Invalid Huffman code for IS coeff");
+}
+
 static inline int huffman_decode_is_inv(BitReaderMSB& r) {
     uint32_t c = 0;
     for (int len = 1; len <= 7; ++len) {
         c = (c << 1) | r.read_bits(1);
-        for (int k = 0; k < IS_INV_COUNT[len]; ++k)
-            if (IS_INV_BY_LEN[len][k].code == c) return IS_INV_BY_LEN[len][k].sym;
+        int16_t s = g_is_inv_lut[((1 << len) - 2) + (int)c];
+        if (s != INT16_MIN) return s;
     }
     throw std::runtime_error("Invalid Huffman code for IS inversion");
 }
+
 static inline int huffman_decode_active(BitReaderMSB& r) {
     uint32_t c = 0;
     for (int len = 1; len <= 13; ++len) {
         c = (c << 1) | r.read_bits(1);
-        for (int k = 0; k < ACTIVE_COUNT[len]; ++k)
-            if (ACTIVE_BY_LEN[len][k].code == c) return ACTIVE_BY_LEN[len][k].sym;
+        int16_t s = g_active_lut[((1 << len) - 2) + (int)c];
+        if (s != INT16_MIN) return s;
     }
     throw std::runtime_error("Invalid Huffman code for active mask");
 }
+
 static inline int huffman_decode_mode_ms(BitReaderMSB& r) {
     uint32_t c = 0;
     for (int len = 1; len <= 7; ++len) {
         c = (c << 1) | r.read_bits(1);
-        for (int k = 0; k < MODE_MS_COUNT[len]; ++k)
-            if (MODE_MS_BY_LEN[len][k].code == c) return MODE_MS_BY_LEN[len][k].sym;
+        int16_t s = g_mode_ms_lut[((1 << len) - 2) + (int)c];
+        if (s != INT16_MIN) return s;
     }
     throw std::runtime_error("Invalid Huffman code for mode_ms");
 }
 
 static inline int decode_huffman_small(BitReaderMSB& r) {
-    if (r.read_bits(1) != 0) return 0;        
-    if (r.read_bits(1) == 0) return 1;        
-    if (r.read_bits(1) != 0) return -1;       
-    return r.read_bits(1) ? -2 : 2;          
+    if (r.read_bits(1) != 0) return 0;
+    if (r.read_bits(1) == 0) return 1;
+    if (r.read_bits(1) != 0) return -1;
+    return r.read_bits(1) ? -2 : 2;
 }
 
 static inline void decode_huffman_small_vec(BitReaderMSB& r, int32_t* out, int n) {
     for (int i = 0; i < n; ++i) out[i] = decode_huffman_small(r);
+}
+
+static inline int decode_huffman_large(BitReaderMSB& r) {
+    if (r.read_bits(1) == 0) return 0;
+    if (r.read_bits(1) == 1) {
+        return r.read_bits(1) ? -1 : 1;
+    }
+    if (r.read_bits(1) == 0) return -2;
+    if (r.read_bits(1) == 1) return 2;
+    return r.read_bits(1) ? -3 : 3;
+}
+
+static inline void decode_huffman_large_vec(BitReaderMSB& r, int32_t* out, int n) {
+    for (int i = 0; i < n; ++i) out[i] = decode_huffman_large(r);
+}
+
+struct WptHuffSlotDecoder {
+    static constexpr int SHORT_MAX = 12;
+    int max_len = 0;
+    std::vector<int16_t> lut_short;                       
+    std::vector<std::vector<std::pair<int,int>>> by_len;  
+};
+
+static void build_wpt_decoder(WptHuffSlotDecoder& dec, int slot) {
+    dec.max_len = 0;
+    dec.by_len.assign(23, {});
+    dec.lut_short.assign(1 << (WptHuffSlotDecoder::SHORT_MAX + 1), INT16_MIN);
+    for (int i = 0; i < 255; ++i) {
+        int len = WPT_COEFF_HUFF_LEN[slot][i];
+        if (len == 0) continue;
+        int code = (int)WPT_COEFF_HUFF_CODE[slot][i];
+        int sym  = i + WPT_COEFF_HUFF_LO;
+        if (len <= WptHuffSlotDecoder::SHORT_MAX) {
+            dec.lut_short[((1 << len) - 2) + code] = (int16_t)sym;
+        } else {
+            dec.by_len[len].push_back({code, sym});
+        }
+        if (len > dec.max_len) dec.max_len = len;
+    }
+}
+
+static inline int decode_wpt_huff(BitReaderMSB& r, const WptHuffSlotDecoder& dec) {
+    int code = 0;
+    const int16_t* lut = dec.lut_short.data();
+    for (int len = 1; len <= WptHuffSlotDecoder::SHORT_MAX; ++len) {
+        code = (code << 1) | (int)r.read_bits(1);
+        int16_t s = lut[((1 << len) - 2) + code];
+        if (s != INT16_MIN) return s;
+    }
+    for (int len = WptHuffSlotDecoder::SHORT_MAX + 1; len <= dec.max_len; ++len) {
+        code = (code << 1) | (int)r.read_bits(1);
+        for (const auto& p : dec.by_len[len])
+            if (p.first == code) return p.second;
+    }
+    throw std::runtime_error("Invalid WPT Huffman code");
 }
 
 struct DecoderOptions {
@@ -227,6 +334,8 @@ static bool parse_decoder_args(int argc, char** argv, DecoderOptions& o)
 
 void decompress_wha_to_wav(const DecoderOptions& opts)
 {
+    build_huffman_luts();
+
     std::ifstream f(opts.input_wha, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open " + opts.input_wha);
 
@@ -251,8 +360,8 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
     uint32_t block_count = read_u32(f);
     float    target_kbps = read_f32(f);
     uint8_t  block_format_version = read_u8(f);
-    if (block_format_version < 18 || block_format_version > 31)
-        throw std::runtime_error("Unsupported block format version (only v18-v31)");
+    if (block_format_version < 18 || block_format_version > 33)
+        throw std::runtime_error("Unsupported block format version (only v18-v33)");
 
     uint32_t total_frames = 0;
     if (version >= 21) total_frames = read_u32(f);
@@ -318,6 +427,10 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
     drwav wav;
     if (!drwav_init_file_write(&wav, opts.output_wav.c_str(), &fmt, nullptr))
         throw std::runtime_error("dr_wav failed to init");
+
+    std::vector<WptHuffSlotDecoder> wpt_decoders(WPT_COEFF_HUFF_SLOTS);
+    for (int s = 0; s < WPT_COEFF_HUFF_SLOTS; ++s)
+        build_wpt_decoder(wpt_decoders[s], s);
 
     PWPT wpt;
     ModeState long_state, short_state;
@@ -669,11 +782,38 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
                 throw std::runtime_error("k_sub_vals0 OOB");
             uint32_t sym = k_sub_vals0[k_idx0++];
 
-            if (block_format_version >= 31 && sym == 0) {
+            bool is_huff_small = false, is_huff_large = false, is_wpt = false;
+            int  wpt_slot = 0;
+            int  k_rice = 0;
+            if (block_format_version >= 33) {
+                if      (sym == 0)   is_huff_small = true;
+                else if (sym == 1)   is_huff_large = true;
+                else if (sym < 10) { is_wpt = true; wpt_slot = WPT_HUFF_SLOT_MAP[sym - 2]; }
+                else                 k_rice = (int)sym - 10;
+            } else if (block_format_version >= 32) {
+                if      (sym == 0) is_huff_small = true;
+                else if (sym == 1) is_huff_large = true;
+                else               k_rice = (int)sym - 2;
+            } else if (block_format_version >= 31) {
+                if (sym == 0) is_huff_small = true;
+                else          k_rice = (int)sym - 1;
+            } else {
+                k_rice = (int)sym;
+            }
+
+            if (is_huff_small) {
                 quant0[i].resize(band_shapes[i]);
                 decode_huffman_small_vec(payload_reader, quant0[i].data(), band_shapes[i]);
+            } else if (is_huff_large) {
+                quant0[i].resize(band_shapes[i]);
+                decode_huffman_large_vec(payload_reader, quant0[i].data(), band_shapes[i]);
+            } else if (is_wpt) {
+                quant0[i].resize(band_shapes[i]);
+                int32_t* out = quant0[i].data();
+                const WptHuffSlotDecoder& dec = wpt_decoders[wpt_slot];
+                for (int j = 0; j < band_shapes[i]; ++j)
+                    out[j] = decode_wpt_huff(payload_reader, dec);
             } else {
-                int k_rice = (block_format_version >= 31) ? ((int)sym - 1) : (int)sym;
                 if (k_rice < 0) throw std::runtime_error("Invalid k_rice");
                 if (k_rice > 7) k_rice = 7;
                 auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_rice);
@@ -693,11 +833,38 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
                     throw std::runtime_error("k_sub_vals1 OOB");
                 uint32_t sym = k_sub_vals1[k_idx1++];
 
-                if (block_format_version >= 31 && sym == 0) {
+                bool is_huff_small = false, is_huff_large = false, is_wpt = false;
+                int  wpt_slot = 0;
+                int  k_rice = 0;
+                if (block_format_version >= 33) {
+                    if      (sym == 0)   is_huff_small = true;
+                    else if (sym == 1)   is_huff_large = true;
+                    else if (sym < 10) { is_wpt = true; wpt_slot = WPT_HUFF_SLOT_MAP[sym - 2]; }
+                    else                 k_rice = (int)sym - 10;
+                } else if (block_format_version >= 32) {
+                    if      (sym == 0) is_huff_small = true;
+                    else if (sym == 1) is_huff_large = true;
+                    else               k_rice = (int)sym - 2;
+                } else if (block_format_version >= 31) {
+                    if (sym == 0) is_huff_small = true;
+                    else          k_rice = (int)sym - 1;
+                } else {
+                    k_rice = (int)sym;
+                }
+
+                if (is_huff_small) {
                     quant1[i].resize(band_shapes[i]);
                     decode_huffman_small_vec(payload_reader, quant1[i].data(), band_shapes[i]);
+                } else if (is_huff_large) {
+                    quant1[i].resize(band_shapes[i]);
+                    decode_huffman_large_vec(payload_reader, quant1[i].data(), band_shapes[i]);
+                } else if (is_wpt) {
+                    quant1[i].resize(band_shapes[i]);
+                    int32_t* out = quant1[i].data();
+                    const WptHuffSlotDecoder& dec = wpt_decoders[wpt_slot];
+                    for (int j = 0; j < band_shapes[i]; ++j)
+                        out[j] = decode_wpt_huff(payload_reader, dec);
                 } else {
-                    int k_rice = (block_format_version >= 31) ? ((int)sym - 1) : (int)sym;
                     if (k_rice < 0) throw std::runtime_error("Invalid k_rice");
                     if (k_rice > 7) k_rice = 7;
                     auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_rice);

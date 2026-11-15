@@ -156,6 +156,8 @@ private:
     std::vector<float> win_;
     std::vector<float> win_sq_;
 
+    
+
     void processFrameInPlace(float* frame) {
         constexpr float EPS = 1e-20f;
         constexpr float EPS_SQ = EPS * EPS;
@@ -256,7 +258,7 @@ private:
                             }
                         }
                     }
-                }
+                } 
 
                 offset += size;
             }

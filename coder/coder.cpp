@@ -30,6 +30,7 @@
 #include "energy_shape.h"
 #include "sbr_encode.h"
 #include "pow_filter.h"
+#include "table.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -120,10 +121,12 @@ static const uint8_t MODE_MS_HUFF_LEN[16] = {
 static const uint8_t HUFF_SMALL_LEN_TBL[5]  = { 4, 3, 1, 2, 4 };
 static const uint32_t HUFF_SMALL_CODE_TBL[5] = { 0x5u, 0x3u, 0x1u, 0x0u, 0x4u };
 
-static inline int huffman_small_len(int32_t v) {
-    int idx = v + 2;
-    return ((unsigned)idx > 4u) ? -1 : (int)HUFF_SMALL_LEN_TBL[idx];
-}
+static const uint8_t  HUFF_LARGE_LEN_TBL[7]  = { 5, 3, 3, 1, 3, 4, 5 };
+static const uint32_t HUFF_LARGE_CODE_TBL[7] = {
+    0x15u, 0x04u, 0x07u, 0x00u, 0x06u, 0x0Bu, 0x14u
+};
+
+static const int WPT_HUFF_SLOT_MAP[8] = { 0, 1, 2, 4, 5, 6, 7, 8 };
 
 static inline void write_huffman_small(BitWriterMSB& w, int32_t v) {
     int idx = v + 2;
@@ -162,6 +165,61 @@ static inline void write_huffman_small_vec(BitWriterMSB& w,
         write_huffman_small_batch4(w, qv[j], qv[j+1], qv[j+2], qv[j+3]);
     for (; j < n; ++j)
         write_huffman_small(w, qv[j]);
+}
+
+static inline void write_huffman_large(BitWriterMSB& w, int32_t v) {
+    int idx = v + 3;
+    if ((unsigned)idx > 6u)
+        throw std::runtime_error("WPT Huffman-large: value out of range");
+    w.write_bits(HUFF_LARGE_CODE_TBL[idx], HUFF_LARGE_LEN_TBL[idx]);
+}
+
+static inline void write_huffman_large_batch4(BitWriterMSB& w,
+                                              int32_t v0, int32_t v1,
+                                              int32_t v2, int32_t v3)
+{
+    int i0 = v0 + 3, i1 = v1 + 3, i2 = v2 + 3, i3 = v3 + 3;
+    if ((unsigned)i0 > 6u || (unsigned)i1 > 6u ||
+        (unsigned)i2 > 6u || (unsigned)i3 > 6u)
+        throw std::runtime_error("WPT Huffman-large: value out of range");
+
+    int l0 = HUFF_LARGE_LEN_TBL[i0];
+    int l1 = HUFF_LARGE_LEN_TBL[i1];
+    int l2 = HUFF_LARGE_LEN_TBL[i2];
+    int l3 = HUFF_LARGE_LEN_TBL[i3];
+
+    uint32_t code = HUFF_LARGE_CODE_TBL[i0];
+    code = (code << l1) | HUFF_LARGE_CODE_TBL[i1];
+    code = (code << l2) | HUFF_LARGE_CODE_TBL[i2];
+    code = (code << l3) | HUFF_LARGE_CODE_TBL[i3];
+    w.write_bits(code, l0 + l1 + l2 + l3);
+}
+
+static inline void write_huffman_large_vec(BitWriterMSB& w,
+                                           const std::vector<int32_t>& qv)
+{
+    const size_t n = qv.size();
+    size_t j = 0;
+    for (; j + 4 <= n; j += 4)
+        write_huffman_large_batch4(w, qv[j], qv[j+1], qv[j+2], qv[j+3]);
+    for (; j < n; ++j)
+        write_huffman_large(w, qv[j]);
+}
+
+static inline void write_wpt_huff(BitWriterMSB& w, int32_t sym, int slot) {
+    int idx = (int)sym - WPT_COEFF_HUFF_LO;
+    if ((unsigned)idx >= 255u)
+        throw std::runtime_error("WPT Huffman: symbol out of range");
+    uint8_t len = WPT_COEFF_HUFF_LEN[slot][idx];
+    if (len == 0)
+        throw std::runtime_error("WPT Huffman: symbol not in table");
+    w.write_bits(WPT_COEFF_HUFF_CODE[slot][idx], len);
+}
+
+static inline void write_wpt_huff_vec(BitWriterMSB& w,
+                                      const std::vector<int32_t>& qv, int slot)
+{
+    for (int32_t v : qv) write_wpt_huff(w, v, slot);
 }
 
 struct CLIOptions {
@@ -618,56 +676,77 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     std::vector<uint32_t> k_sub_vals0, k_sub_vals1;
     std::vector<int> k_rice0(band_count, 0), k_rice1(band_count, 0);
-    std::vector<uint8_t> use_huff0(band_count, 0), use_huff1(band_count, 0);
+    std::vector<uint8_t> mode0(band_count, 0), mode1(band_count, 0);
     std::vector<std::vector<uint32_t>> uvals0(band_count), uvals1(band_count);
 
     auto decide_band = [&](const std::vector<int32_t>& qvals,
                            std::vector<uint32_t>& uv,
-                           int& k_rice_out) -> bool {
+                           int& k_rice_out) -> uint8_t {
         const size_t n = qvals.size();
         uv.resize(n);
         for (size_t j = 0; j < n; ++j) uv[j] = zigzag_encode(qvals[j]);
         int k_rice = compute_optimal_rice_k(uv);
-        if (k_rice > 6) k_rice = 6;
+        if (k_rice > 7) k_rice = 7;
         k_rice_out = k_rice;
-
-        bool can_huff = true;
-        int  huff_bits = 0;
-        for (size_t j = 0; j < n; ++j) {
-            int idx = qvals[j] + 2;
-            if ((unsigned)idx > 4u) { can_huff = false; break; }
-            huff_bits += HUFF_SMALL_LEN_TBL[idx];
-        }
-        if (!can_huff) return false;
 
         int rice_bits = 0;
         for (size_t j = 0; j < n; ++j)
             rice_bits += (int)(uv[j] >> k_rice) + 1 + k_rice;
-        return huff_bits < rice_bits;
+
+        int best_bits = rice_bits;
+        uint8_t best_mode = (uint8_t)(10 + k_rice);
+
+        if (n > 0) {
+            int bits = 0; bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                int idx = (int)qvals[j] + 2;
+                if ((unsigned)idx > 4u) { ok = false; break; }
+                bits += HUFF_SMALL_LEN_TBL[idx];
+            }
+            if (ok && bits < best_bits) { best_bits = bits; best_mode = 0; }
+        }
+
+        if (n > 0) {
+            int bits = 0; bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                int idx = (int)qvals[j] + 3;
+                if ((unsigned)idx > 6u) { ok = false; break; }
+                bits += HUFF_LARGE_LEN_TBL[idx];
+            }
+            if (ok && bits < best_bits) { best_bits = bits; best_mode = 1; }
+        }
+
+        for (int s = 0; s < 8; ++s) {
+            int slot = WPT_HUFF_SLOT_MAP[s];
+            int bits = 0; bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                int sym = (int)qvals[j];
+                int idx = sym - WPT_COEFF_HUFF_LO;
+                if ((unsigned)idx >= 255u) { ok = false; break; }
+                uint8_t len = WPT_COEFF_HUFF_LEN[slot][idx];
+                if (len == 0) { ok = false; break; }
+                bits += len;
+            }
+            if (ok && bits < best_bits) { best_bits = bits; best_mode = (uint8_t)(2 + s); }
+        }
+
+        return best_mode;
     };
 
     for (int i = 0; i < band_count; ++i) {
         if (active0[i]) {
             int k_rice = 0;
-            bool use_h = decide_band(qres0.quantized_per_level[i], uvals0[i], k_rice);
+            uint8_t mode = decide_band(qres0.quantized_per_level[i], uvals0[i], k_rice);
             k_rice0[i] = k_rice;
-            if (use_h) {
-                use_huff0[i] = 1;
-                k_sub_vals0.push_back(0);
-            } else {
-                k_sub_vals0.push_back((uint32_t)(k_rice + 1));
-            }
+            mode0[i]   = mode;
+            k_sub_vals0.push_back((uint32_t)mode);
         }
         if (stereo && active1[i]) {
             int k_rice = 0;
-            bool use_h = decide_band(qres1.quantized_per_level[i], uvals1[i], k_rice);
+            uint8_t mode = decide_band(qres1.quantized_per_level[i], uvals1[i], k_rice);
             k_rice1[i] = k_rice;
-            if (use_h) {
-                use_huff1[i] = 1;
-                k_sub_vals1.push_back(0);
-            } else {
-                k_sub_vals1.push_back((uint32_t)(k_rice + 1));
-            }
+            mode1[i]   = mode;
+            k_sub_vals1.push_back((uint32_t)mode);
         }
     }
 
@@ -682,8 +761,14 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     for (int i = 0; i < band_count; ++i) {
         if (!active0[i]) continue;
-        if (use_huff0[i]) {
+        uint8_t m = mode0[i];
+        if (m == 0) {
             write_huffman_small_vec(payload_writer, qres0.quantized_per_level[i]);
+        } else if (m == 1) {
+            write_huffman_large_vec(payload_writer, qres0.quantized_per_level[i]);
+        } else if (m < 10) {
+            int slot = WPT_HUFF_SLOT_MAP[m - 2];
+            write_wpt_huff_vec(payload_writer, qres0.quantized_per_level[i], slot);
         } else {
             rice_encode(payload_writer, uvals0[i], k_rice0[i]);
         }
@@ -691,8 +776,14 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     if (stereo) {
         for (int i = 0; i < band_count; ++i) {
             if (!active1[i]) continue;
-            if (use_huff1[i]) {
+            uint8_t m = mode1[i];
+            if (m == 0) {
                 write_huffman_small_vec(payload_writer, qres1.quantized_per_level[i]);
+            } else if (m == 1) {
+                write_huffman_large_vec(payload_writer, qres1.quantized_per_level[i]);
+            } else if (m < 10) {
+                int slot = WPT_HUFF_SLOT_MAP[m - 2];
+                write_wpt_huff_vec(payload_writer, qres1.quantized_per_level[i], slot);
             } else {
                 rice_encode(payload_writer, uvals1[i], k_rice1[i]);
             }
@@ -807,7 +898,7 @@ void save_compressed_buffered(
     uint8_t ch = (uint8_t)num_channels; f.write((char*)&ch, 1);
     uint32_t block_count = (uint32_t)blocks.size(); f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 31;
+    uint8_t block_format_version = 33;
     f.write((char*)&block_format_version, 1);
     f.write((char*)&total_frames, 4);
 
@@ -829,7 +920,7 @@ void save_compressed_buffered(
 
     int long_blocks = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v30/block v31 to " << path << " ("
+    std::cout << "Saved container v30/block v33 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no")

@@ -245,19 +245,15 @@ inline QuantResult quantize_levels(
     }
 
     // for (auto x : quantized_per_level) {
-    //     bool f = 0;
+    //     bool f = 0, f2 = 0;
     //     for (auto y : x) {
     //         f |= (y != 0);
     //     }
         
-    //     for (auto y : x) {
-    //         f &= (std::abs(y) < 3);
-    //     }
-
     //     if (f) {
-    //         for (auto y : x) {
+    //     for (auto y : x) {
     //         std::cout << y << ' ';
-    //         }
+    //     }
     //     }
     //     std::cout << '\n';
     // }

@@ -100,7 +100,7 @@ inline void apply_highfreq_attenuation(std::vector<float>& e0, std::vector<float
                                        int num_channels, bool has_transient)
 {
     const float kbps_per_channel = target_kbps / float(num_channels);
-
+    
     if (kbps_per_channel >= 48.0f)
         return;
 
