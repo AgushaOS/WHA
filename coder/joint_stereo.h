@@ -57,7 +57,8 @@ inline int get_is_start_from_base(int base, int total_bands) {
 
 inline int get_is_segmented_threshold(float target_kbps, int total_bands) {
     int base;
-    if (target_kbps < 96.0f)        base = 8;
+    if (target_kbps < 64.0f) base = 4;
+    else if (target_kbps < 96.0f)        base = 8;
     else if (target_kbps < 160.0f)  base = 10;
     else if (target_kbps < 192.0f)  base = 12;
     else                            base = 16;

@@ -31,6 +31,7 @@
 #include "sbr_encode.h"
 #include "pow_filter.h"
 #include "table.h"
+#include "kidx_huff.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -220,6 +221,33 @@ static inline void write_wpt_huff_vec(BitWriterMSB& w,
                                       const std::vector<int32_t>& qv, int slot)
 {
     for (int32_t v : qv) write_wpt_huff(w, v, slot);
+}
+
+static inline void write_kidx_huff(BitWriterMSB& w, uint32_t sym, int slot) {
+    if (sym > 16u)
+        throw std::runtime_error("kidx Huffman: symbol out of range");
+    uint8_t len = KIDX_COEFF_HUFF_LEN[slot][sym];
+    if (len == 0)
+        throw std::runtime_error("kidx Huffman: symbol not in table");
+    w.write_bits(KIDX_COEFF_HUFF_CODE[slot][sym], len);
+}
+
+static int select_best_kidx_slot(const std::vector<uint32_t>& vals) {
+    if (vals.empty()) return 0;
+    int best_slot = 0;
+    int best_bits = INT_MAX;
+    for (int s = 0; s < 8; ++s) {
+        int bits = 0;
+        bool ok = true;
+        for (uint32_t v : vals) {
+            if (v > 16u) { ok = false; break; }
+            uint8_t len = KIDX_COEFF_HUFF_LEN[s][v];
+            if (len == 0) { ok = false; break; }
+            bits += len;
+        }
+        if (ok && bits < best_bits) { best_bits = bits; best_slot = s; }
+    }
+    return best_slot;
 }
 
 struct CLIOptions {
@@ -686,7 +714,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         uv.resize(n);
         for (size_t j = 0; j < n; ++j) uv[j] = zigzag_encode(qvals[j]);
         int k_rice = compute_optimal_rice_k(uv);
-        if (k_rice > 7) k_rice = 7;
+        if (k_rice > 6) k_rice = 6;   
         k_rice_out = k_rice;
 
         int rice_bits = 0;
@@ -750,14 +778,14 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
-    int k_sub_k0 = k_sub_vals0.empty() ? 0 : std::min(compute_optimal_rice_k(k_sub_vals0), 3);
-    int k_sub_k1 = (stereo && !k_sub_vals1.empty())
-                   ? std::min(compute_optimal_rice_k(k_sub_vals1), 3) : 0;
+    int kidx_slot0 = select_best_kidx_slot(k_sub_vals0);
+    int kidx_slot1 = stereo ? select_best_kidx_slot(k_sub_vals1) : 0;
 
-    payload_writer.write_bits((uint32_t)k_sub_k0, 2);
-    if (stereo) payload_writer.write_bits((uint32_t)k_sub_k1, 2);
-    if (!k_sub_vals0.empty()) rice_encode(payload_writer, k_sub_vals0, k_sub_k0);
-    if (stereo && !k_sub_vals1.empty()) rice_encode(payload_writer, k_sub_vals1, k_sub_k1);
+    payload_writer.write_bits((uint32_t)kidx_slot0, 3);
+    if (stereo) payload_writer.write_bits((uint32_t)kidx_slot1, 3);
+
+    for (uint32_t v : k_sub_vals0) write_kidx_huff(payload_writer, v, kidx_slot0);
+    if (stereo) for (uint32_t v : k_sub_vals1) write_kidx_huff(payload_writer, v, kidx_slot1);
 
     for (int i = 0; i < band_count; ++i) {
         if (!active0[i]) continue;
@@ -898,7 +926,7 @@ void save_compressed_buffered(
     uint8_t ch = (uint8_t)num_channels; f.write((char*)&ch, 1);
     uint32_t block_count = (uint32_t)blocks.size(); f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 33;
+    uint8_t block_format_version = 34;
     f.write((char*)&block_format_version, 1);
     f.write((char*)&total_frames, 4);
 
@@ -920,7 +948,7 @@ void save_compressed_buffered(
 
     int long_blocks = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v30/block v33 to " << path << " ("
+    std::cout << "Saved container v30/block v34 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no")

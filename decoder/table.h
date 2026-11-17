@@ -27,3 +27,5 @@ static const int WPT_COEFF_HUFF_LO = -127;
 static const int WPT_COEFF_HUFF_HI = 127;
 static const int WPT_COEFF_HUFF_SLOTS = 8;
 static const int WPT_COEFF_HUFF_BASELINE_SLOT = 0;
+
+

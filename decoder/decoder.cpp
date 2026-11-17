@@ -24,6 +24,7 @@
 #include "overlap_add.h"
 #include "pow_filter.h"
 #include "table.h"
+#include "kidx_huff.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -120,10 +121,11 @@ static const SymCode IS_INV_BY_LEN[8][8] = {
 };
 static const int IS_INV_COUNT[8] = {0,1,0,1,3,2,7,2};
 
-static int16_t g_active_lut  [1 << 14];                
-static int16_t g_mode_ms_lut [1 <<  8];                
-static int16_t g_is_inv_lut  [1 <<  8];                
-static int16_t g_is_coeff_lut[IS_TBL_SLOTS][1 << 12]; 
+static int16_t g_active_lut  [1 << 14];
+static int16_t g_mode_ms_lut [1 <<  8];
+static int16_t g_is_inv_lut  [1 <<  8];
+static int16_t g_is_coeff_lut[IS_TBL_SLOTS][1 << 12];
+static int16_t g_kidx_lut    [8][1 << 10];
 
 static void build_huffman_luts()
 {
@@ -164,6 +166,16 @@ static void build_huffman_luts()
             int base = (1 << len) - 2;
             g_is_coeff_lut[t][base + (int)IS_TBL_CODE[t][k]] =
                 (int16_t)(k + IS_TBL_LO);
+        }
+    }
+
+    for (int s = 0; s < 8; ++s) {
+        std::fill(g_kidx_lut[s], g_kidx_lut[s] + (1 << 10), NONE);
+        for (int k = 0; k < 17; ++k) {
+            int len = KIDX_COEFF_HUFF_LEN[s][k];
+            if (len == 0) continue;
+            int base = (1 << len) - 2;
+            g_kidx_lut[s][base + (int)KIDX_COEFF_HUFF_CODE[s][k]] = (int16_t)k;
         }
     }
 }
@@ -235,11 +247,28 @@ static inline void decode_huffman_large_vec(BitReaderMSB& r, int32_t* out, int n
     for (int i = 0; i < n; ++i) out[i] = decode_huffman_large(r);
 }
 
+static inline int decode_kidx_huff(BitReaderMSB& r, int slot) {
+    uint32_t c = 0;
+    const int16_t* lut = g_kidx_lut[slot];
+    for (int len = 1; len <= 9; ++len) {
+        c = (c << 1) | r.read_bits(1);
+        int16_t s = lut[((1 << len) - 2) + (int)c];
+        if (s != INT16_MIN) return s;
+    }
+    throw std::runtime_error("Invalid kidx Huffman code");
+}
+
+static inline std::vector<uint32_t> decode_kidx_huff_vec(BitReaderMSB& r, size_t n, int slot) {
+    std::vector<uint32_t> out(n);
+    for (size_t i = 0; i < n; ++i) out[i] = (uint32_t)decode_kidx_huff(r, slot);
+    return out;
+}
+
 struct WptHuffSlotDecoder {
     static constexpr int SHORT_MAX = 12;
     int max_len = 0;
-    std::vector<int16_t> lut_short;                       
-    std::vector<std::vector<std::pair<int,int>>> by_len;  
+    std::vector<int16_t> lut_short;
+    std::vector<std::vector<std::pair<int,int>>> by_len;
 };
 
 static void build_wpt_decoder(WptHuffSlotDecoder& dec, int slot) {
@@ -360,8 +389,8 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
     uint32_t block_count = read_u32(f);
     float    target_kbps = read_f32(f);
     uint8_t  block_format_version = read_u8(f);
-    if (block_format_version < 18 || block_format_version > 33)
-        throw std::runtime_error("Unsupported block format version (only v18-v33)");
+    if (block_format_version < 18 || block_format_version > 34)
+        throw std::runtime_error("Unsupported block format version (only v18-v34)");
 
     uint32_t total_frames = 0;
     if (version >= 21) total_frames = read_u32(f);
@@ -757,17 +786,24 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
         if (stereo)
             decode_scales_batch(steps1, active1, k_scale1, pred_state.prev_scale1, pred_state.prev_active1);
 
-        int k_sub_k0 = (int)payload_reader.read_bits(2);
-        int k_sub_k1 = stereo ? (int)payload_reader.read_bits(2) : 0;
-
         int active_count0 = 0, active_count1 = 0;
         for (int i = 0; i < expected_band_count; ++i) {
             if (active0[i]) active_count0++;
             if (stereo && active1[i]) active_count1++;
         }
-        auto k_sub_vals0 = rice_decode(payload_reader, (size_t)active_count0, k_sub_k0);
-        std::vector<uint32_t> k_sub_vals1;
-        if (stereo) k_sub_vals1 = rice_decode(payload_reader, (size_t)active_count1, k_sub_k1);
+
+        std::vector<uint32_t> k_sub_vals0, k_sub_vals1;
+        if (block_format_version >= 34) {
+            int kidx_slot0 = (int)payload_reader.read_bits(3);
+            int kidx_slot1 = stereo ? (int)payload_reader.read_bits(3) : 0;
+            k_sub_vals0 = decode_kidx_huff_vec(payload_reader, (size_t)active_count0, kidx_slot0);
+            if (stereo) k_sub_vals1 = decode_kidx_huff_vec(payload_reader, (size_t)active_count1, kidx_slot1);
+        } else {
+            int k_sub_k0 = (int)payload_reader.read_bits(2);
+            int k_sub_k1 = stereo ? (int)payload_reader.read_bits(2) : 0;
+            k_sub_vals0 = rice_decode(payload_reader, (size_t)active_count0, k_sub_k0);
+            if (stereo) k_sub_vals1 = rice_decode(payload_reader, (size_t)active_count1, k_sub_k1);
+        }
 
         quant0.resize(expected_band_count);
         quant1.resize(expected_band_count);

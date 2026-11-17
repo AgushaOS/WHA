@@ -147,7 +147,9 @@ inline SBREncodeResult sbr_analyze(
         const int sb = get_scale_bits(i);
 
         result.rms_idx[i] = get_scale_idx(rms, sb);
+        // std::cout << result.rms_idx[i] << ' ';
     }
+    // std::cout << '\n';
 
     return result;
 }
@@ -155,22 +157,22 @@ inline SBREncodeResult sbr_analyze(
 inline void sbr_write_huffman(BitWriterMSB& writer, uint8_t mask)
 {
     switch (mask) {
-        case 0:  writer.write_bits(0b0,       1); break;
-        case 1:  writer.write_bits(0b11101,   5); break;
-        case 2:  writer.write_bits(0b111111,  6); break;
-        case 3:  writer.write_bits(0b1000,    4); break;
-        case 4:  writer.write_bits(0b10010,   5); break;
-        case 5:  writer.write_bits(0b110100,  6); break;
-        case 6:  writer.write_bits(0b111110,  6); break;
-        case 7:  writer.write_bits(0b101,     3); break;
-        case 8:  writer.write_bits(0b11110,   5); break;
-        case 9:  writer.write_bits(0b1101010, 7); break;
-        case 10: writer.write_bits(0b1101011, 7); break;
-        case 11: writer.write_bits(0b11100,   5); break;
-        case 12: writer.write_bits(0b11011,   5); break;
-        case 13: writer.write_bits(0b10011,   5); break;
-        case 14: writer.write_bits(0b1100,    4); break;
-        default: writer.write_bits(0b0,       1); break;
+        case 0:  writer.write_bits(0b1,        1); break;
+        case 1:  writer.write_bits(0b01011,    5); break;
+        case 2:  writer.write_bits(0b00000,    5); break;
+        case 3:  writer.write_bits(0b01001,    5); break;
+        case 4:  writer.write_bits(0b00001,    5); break;
+        case 5:  writer.write_bits(0b01110010, 8); break;
+        case 6:  writer.write_bits(0b011101,   6); break;
+        case 7:  writer.write_bits(0b001,      3); break;
+        case 8:  writer.write_bits(0b0001,     4); break;
+        case 9:  writer.write_bits(0b01110011, 8); break;
+        case 10: writer.write_bits(0b0111000,  7); break;
+        case 11: writer.write_bits(0b01010,    5); break;
+        case 12: writer.write_bits(0b01111,    5); break;
+        case 13: writer.write_bits(0b01000,    5); break;
+        case 14: writer.write_bits(0b0110,     4); break;
+        default: writer.write_bits(0b1,        1); break;
     }
 }
 

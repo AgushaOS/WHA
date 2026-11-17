@@ -57,36 +57,52 @@ struct SBRDecodeResult {
 inline uint8_t sbr_read_huffman(BitReaderMSB& reader)
 {
     uint32_t code = 0;
-    for (int len = 1; len <= 7; ++len) {
+
+    for (int len = 1; len <= 8; ++len) {
         code = (code << 1) | reader.read_bits(1);
+
         switch (len) {
-            case 1: if (code == 0b0)      return 0;  break;
-            case 3: if (code == 0b101)    return 7;  break;
+            case 1:
+                if (code == 0b1) return 0;
+                break;
+
+            case 3:
+                if (code == 0b001) return 7;
+                break;
+
             case 4:
-                if (code == 0b1000) return 3;
-                if (code == 0b1100) return 14;
+                if (code == 0b0001) return 8;
+                if (code == 0b0110) return 14;
                 break;
+
             case 5:
-                if (code == 0b11101) return 1;
-                if (code == 0b10010) return 4;
-                if (code == 0b11110) return 8;
-                if (code == 0b11100) return 11;
-                if (code == 0b11011) return 12;
-                if (code == 0b10011) return 13;
+                if (code == 0b01011) return 1;
+                if (code == 0b00000) return 2;
+                if (code == 0b01001) return 3;
+                if (code == 0b00001) return 4;
+                if (code == 0b01010) return 11;
+                if (code == 0b01111) return 12;
+                if (code == 0b01000) return 13;
                 break;
+
             case 6:
-                if (code == 0b111111) return 2;
-                if (code == 0b110100) return 5;
-                if (code == 0b111110) return 6;
+                if (code == 0b011101) return 6;
                 break;
+
             case 7:
-                if (code == 0b1101010) return 9;
-                if (code == 0b1101011) return 10;
+                if (code == 0b0111000) return 10;
+                break;
+
+            case 8:
+                if (code == 0b01110010) return 5;
+                if (code == 0b01110011) return 9;
                 break;
         }
     }
+
     throw std::runtime_error("Invalid SBR Huffman code");
 }
+
 
 inline void sbr_decode_v23(SBRDecodeResult& result,
                            BitReaderMSB& reader,

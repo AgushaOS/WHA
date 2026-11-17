@@ -2,7 +2,7 @@
 
 struct EncoderSettings {
     bool  enable_ms                       = true;
-    int   reservoir_max_factor            = 1024;
+    int   reservoir_max_factor            = 2048;
     float default_target_kbps             = 128.0f;
     bool  verbose                         = false;
     float transient_ratio_threshold       = 0.15f;
