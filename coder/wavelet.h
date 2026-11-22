@@ -176,7 +176,7 @@ public:
 
         if (sr >= 44100) {
             {
-                const int atten_start = total_bands * 7 / 8;
+                const int atten_start = total_bands * 14 / 16;
 
             for (int i = atten_start; i < total_bands; ++i) {
                 float* begin = data.data() + i * band_size;

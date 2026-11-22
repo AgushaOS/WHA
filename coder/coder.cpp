@@ -608,7 +608,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         qres1 = quantize_levels(for_quant1, bits1, target_kbps, num_channels);
     }
 
-    std::vector<uint32_t> scale_raw0, scale_raw1, scale_pred0, scale_pred1;
+    std::vector<uint32_t> scale_pred0, scale_pred1;
     std::vector<uint32_t> full_scale0(band_count, 0), full_scale1(band_count, 0);
     for (int i = 0; i < band_count; ++i) {
         if (active0[i]) {
@@ -616,56 +616,35 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             float step = scale_and_bits_to_step(qres0.scales[i], bits0[i]);
             uint32_t idx = get_scale_idx(step, sb);
             full_scale0[i] = idx;
-            scale_raw0.push_back(idx);
-            if (can_state_pred) {
-                uint32_t val = idx;
-                if (i < (int)pred_state.prev_active0.size() && pred_state.prev_active0[i]) {
-                    int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale0[i];
-                    val = zigzag_encode(d);
-                }
-                scale_pred0.push_back(val);
+            uint32_t val = idx;
+            if (i < (int)pred_state.prev_active0.size() && pred_state.prev_active0[i]) {
+                int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale0[i];
+                val = zigzag_encode(d);
             }
+            scale_pred0.push_back(val);
         }
         if (stereo && active1[i]) {
             int sb = get_scale_bits(i);
             float step = scale_and_bits_to_step(qres1.scales[i], bits1[i]);
             uint32_t idx = get_scale_idx(step, sb);
             full_scale1[i] = idx;
-            scale_raw1.push_back(idx);
-            if (can_state_pred) {
-                uint32_t val = idx;
-                if (i < (int)pred_state.prev_active1.size() && pred_state.prev_active1[i]) {
-                    int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale1[i];
-                    val = zigzag_encode(d);
-                }
-                scale_pred1.push_back(val);
+            uint32_t val = idx;
+            if (i < (int)pred_state.prev_active1.size() && pred_state.prev_active1[i]) {
+                int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale1[i];
+                val = zigzag_encode(d);
             }
+            scale_pred1.push_back(val);
         }
     }
 
-    int k_scale0_raw = compute_optimal_rice_k(scale_raw0);
-    int k_scale1_raw = stereo ? compute_optimal_rice_k(scale_raw1) : 0;
-    size_t raw_scale_bits = estimate_rice_bits(scale_raw0, k_scale0_raw) +
-                            (stereo ? estimate_rice_bits(scale_raw1, k_scale1_raw) : 0);
-
-    int k_scale0_pred = 0, k_scale1_pred = 0;
-    size_t pred_scale_bits = SIZE_MAX;
-    if (can_state_pred) {
-        k_scale0_pred = compute_optimal_rice_k(scale_pred0);
-        k_scale1_pred = stereo ? compute_optimal_rice_k(scale_pred1) : 0;
-        pred_scale_bits = estimate_rice_bits(scale_pred0, k_scale0_pred) +
-                          (stereo ? estimate_rice_bits(scale_pred1, k_scale1_pred) : 0);
-    }
-    bool use_scale_pred = can_state_pred && (pred_scale_bits < raw_scale_bits);
-    int k_scale0 = use_scale_pred ? k_scale0_pred : k_scale0_raw;
-    int k_scale1 = use_scale_pred ? k_scale1_pred : k_scale1_raw;
-    auto scale_vals0 = use_scale_pred ? std::move(scale_pred0) : std::move(scale_raw0);
-    auto scale_vals1 = use_scale_pred ? std::move(scale_pred1) : std::move(scale_raw1);
+    int k_scale0 = compute_optimal_rice_k(scale_pred0);
+    int k_scale1 = stereo ? compute_optimal_rice_k(scale_pred1) : 0;
+    auto scale_vals0 = std::move(scale_pred0);
+    auto scale_vals1 = std::move(scale_pred1);
 
     uint8_t k_scale_byte = (uint8_t)(k_scale0 & 0x07);
     if (stereo) k_scale_byte |= ((k_scale1 & 0x07) << 3);
     if (block_is_full) k_scale_byte |= 0x80;
-    if (use_scale_pred) k_scale_byte |= 0x40;
     header.push_back(k_scale_byte);
 
     BitWriterMSB payload_writer;
@@ -714,7 +693,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         uv.resize(n);
         for (size_t j = 0; j < n; ++j) uv[j] = zigzag_encode(qvals[j]);
         int k_rice = compute_optimal_rice_k(uv);
-        if (k_rice > 6) k_rice = 6;   
+        if (k_rice > 6) k_rice = 6;
         k_rice_out = k_rice;
 
         int rice_bits = 0;
@@ -926,7 +905,7 @@ void save_compressed_buffered(
     uint8_t ch = (uint8_t)num_channels; f.write((char*)&ch, 1);
     uint32_t block_count = (uint32_t)blocks.size(); f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 34;
+    uint8_t block_format_version = 36;
     f.write((char*)&block_format_version, 1);
     f.write((char*)&total_frames, 4);
 
@@ -948,7 +927,7 @@ void save_compressed_buffered(
 
     int long_blocks = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v30/block v34 to " << path << " ("
+    std::cout << "Saved container v30/block v35 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no")
