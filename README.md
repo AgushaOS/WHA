@@ -80,15 +80,15 @@ For usage, it is better to compile before FFTW with AVX optimizations for full p
 **Encoding:**
 ```bash
 //Encoding quality mode
-./code [input.wav] [bitrate]
+./code [input.wav] --bitrate [bitrate] (mods: --no-ms / --no-is / --no-sbr)
 
 //Encoding speed mode
-./code [input.wav] [bitrate] --speed
+./code [input.wav] --speed --bitrate [bitrate] (mods: --no-ms / --no-is / --no-sbr)
 
 // Both files will be written into [input].wha format
 ```
 **Decoding:**
 ```bash
 //Decoding (for both quality and speed mode)
-./decode [input.wha] [output.wav] 
+./decode [input.wha] --output [output.wav] 
 ```
