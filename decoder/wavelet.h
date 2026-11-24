@@ -6,7 +6,6 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
-#include <random>
 
 class DD64out {
 protected:
@@ -100,83 +99,49 @@ protected:
         if (tmp.size() < N)
             tmp.resize(N);
 
+        float* __restrict dst = tmp.data();
+
         for (size_t i = 0; i < even_len; ++i)
-            tmp[i << 1] = even[i];
+            dst[i << 1] = even[i];
 
         for (size_t i = 0; i < odd_len; ++i)
-            tmp[(i << 1) + 1] = odd[i];
+            dst[(i << 1) + 1] = odd[i];
 
-        std::memcpy(data, tmp.data(), N * sizeof(float));
+        std::memcpy(data, dst, N * sizeof(float));
+    }
+
+    void reconstruct_tree(float* __restrict data,
+                          size_t N,
+                          int level) const {
+        for (int L = level - 1; L >= 0; --L) {
+            const size_t step = N >> L;
+
+            for (size_t offset = 0; offset < N; offset += step)
+                reconstruct_block(data + offset, step);
+        }
     }
 
 public:
-    std::vector<float> wpt_reconstruct(std::vector<std::vector<float>> tree, int level) {
-        size_t bands = tree.size();
-        if (bands == 0) return {};
-        size_t band_size = tree[0].size();
-        std::vector<float> data(bands * band_size);
-        for (size_t i = 0; i < bands; ++i) {
-            std::memcpy(data.data() + i * band_size,
-                        tree[i].data(),
-                        band_size * sizeof(float));
-        }
-        const size_t N = data.size();
-        for (int L = level - 1; L >= 0; --L) {
-            size_t step = N >> L;
-            for (size_t offset = 0; offset < N; offset += step) {
-                reconstruct_block(data.data() + offset, step);
-            }
-        }
-        return data;
+
+    std::vector<float> wpt_reconstruct_flat(
+        std::vector<float>& data,
+        int level)
+    {
+        reconstruct_tree(data.data(), data.size(), level);
+        return std::move(data);
     }
 };
 
-uint64_t bi = 0;
 
 class PWPT : public DD64out {
 private:
-    static inline float fast_pow_1333(float x) {
-        return x * std::cbrt(x);
-    }
 
-    std::vector<int> gray_permutation(int level) const {
-        const int n = 1 << level;
-        std::vector<int> perm(n);
-
-        for (int i = 0; i < n; ++i)
-            perm[i] = i ^ (i >> 1);
-
-        return perm;
-    }
-
-    void apply_temporal_dither(
-        std::vector<float>& pcm,
-        float kbps_per_channel) const
-    {
-        if (kbps_per_channel > 96.0f)
-            return;
-
-        const float AMPLITUDE = 3e-5f;
-
-        uint32_t seed = (uint32_t)bi * 1000000u + 1u;
-
-        for (size_t i = 0; i < pcm.size(); ++i) {
-            seed = seed * 1664525u + 1013904223u;
-            float rand1 =
-                static_cast<float>(seed) / 4294967296.0f;
-
-            seed = seed * 1664525u + 1013904223u;
-            float rand2 =
-                static_cast<float>(seed) / 4294967296.0f;
-
-            float dither =
-                (rand1 + rand2 - 1.0f) * AMPLITUDE;
-
-            pcm[i] += dither;
-        }
+    static inline int gray_code(int i) {
+        return i ^ (i >> 1);
     }
 
 public:
+
     std::vector<float> iwpt(
         std::vector<std::vector<float>>& subbands,
         float sr,
@@ -186,48 +151,64 @@ public:
     {
         const int total_bands = 1 << levels;
 
-        bi++;
+        if (total_bands == 0 || subbands.empty())
+            return {};
 
-        if (sr >= 44100) {
-            const int atten_start = total_bands * 3 / 4;
+        const size_t band_size = subbands[0].size();
+        const size_t N = size_t(total_bands) * band_size;
 
-            for (int i = atten_start; i < total_bands; ++i)
-                for (float& x : subbands[i])
-                    x *= 8.0f;
+        float attenuation = 1.0f;
 
-            if (32 <= target_kbps / float(channels) &&
-                target_kbps / float(channels) < 64)
-            {
-                for (int i = atten_start; i < total_bands; ++i)
-                    for (float& x : subbands[i])
-                        x *= 8.0f;
+        int atten_start = total_bands;
+
+        if (sr >= 44100.0f) {
+            atten_start = total_bands * 3 / 4;
+
+            attenuation = 8.0f;
+
+            const float bitrate_per_channel =
+                target_kbps / channels;
+
+            if (bitrate_per_channel >= 32.0f && bitrate_per_channel < 64.0f) {
+                attenuation *= 8.0f;
             }
         }
+
+        std::vector<float> data(N);
+
+        float* __restrict dst = data.data();
 
         if (levels > 1) {
-            const auto perm = gray_permutation(levels);
-
-            std::vector<std::vector<float>> reordered(total_bands);
 
             for (int i = 0; i < total_bands; ++i) {
-                reordered[perm[i]] = std::move(subbands[i]);
-            }
+                const size_t dst_offset =
+                    size_t(gray_code(i)) * band_size;
 
-            subbands = std::move(reordered);
+                const float* __restrict src =
+                    subbands[i].data();
+
+                float* __restrict out =
+                    dst + dst_offset;
+
+                if (i >= atten_start && attenuation != 1.0f) {
+                    for (size_t j = 0; j < band_size; ++j)
+                        out[j] = src[j] * attenuation;
+                } else {
+                    std::memcpy(out, src, band_size * sizeof(float));
+                }
+            }
+        } else {
+            std::memcpy(dst, subbands[0].data(), band_size * sizeof(float));
+
+            if (attenuation != 1.0f) {
+                for (size_t i = 0; i < band_size; ++i)
+                    dst[i] *= attenuation;
+            }
         }
 
-        std::vector<float> pcm =
-            wpt_reconstruct(subbands, levels);
+        reconstruct_tree(dst, N, levels);
 
-        const float kbps_per_channel =
-            target_kbps / float(channels);
-
-        apply_temporal_dither(
-            pcm,
-            kbps_per_channel
-        );
-
-        return pcm;
+        return data;
     }
 };
 

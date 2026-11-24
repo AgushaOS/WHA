@@ -95,16 +95,16 @@ public:
         while (num_bits > 0) {
             int space = 64 - bit_count_;
             int to_write = (num_bits < space) ? num_bits : space;
-            
+
             int shift = num_bits - to_write;
             uint64_t mask = (to_write == 64) ? ~0ULL : ((1ULL << to_write) - 1);
             uint64_t chunk = (value >> shift) & mask;
-            
+
             buffer_ = (buffer_ << to_write) | chunk;
             bit_count_ += to_write;
-            
+
             if (bit_count_ == 64) flush64();
-            
+
             num_bits -= to_write;
         }
     }
@@ -137,17 +137,18 @@ public:
 };
 
 inline void rice_encode(BitWriterMSB& writer, const std::vector<uint32_t>& data, int k) {
-    for (uint32_t x : data) {
-        uint32_t q = x >> k;
-        uint32_t r = x & ((1u << k) - 1);
-        
-        if (q > 0) {
-            writer.write_bits(~0ULL, q);
+    if (k == 0) {
+        for (uint32_t x : data) {
+            if (x > 0) writer.write_bits(~0ULL, x);
+            writer.write_bits(0, 1);
         }
-        writer.write_bits(0, 1);
-        
-        if (k > 0) {
-            writer.write_bits(r, k);
+    } else {
+        const uint32_t rmask = (1u << k) - 1u;
+        for (uint32_t x : data) {
+            const uint32_t q = x >> k;
+            if (q > 0) writer.write_bits(~0ULL, q);
+            writer.write_bits(0, 1);
+            writer.write_bits(x & rmask, k);
         }
     }
 }

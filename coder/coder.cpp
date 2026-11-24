@@ -12,7 +12,9 @@
 #include <cstring>
 #include <array>
 #include <tuple>
-#include <memory> 
+#include <memory>
+#include <climits>
+#include <sys/resource.h>
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 #include "wavelet.h"
@@ -28,6 +30,8 @@
 #include "energy_shape.h"
 #include "sbr_encode.h"
 #include "pow_filter.h"
+#include "table.h"
+#include "kidx_huff.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -35,6 +39,317 @@
 
 float SBR_W0 = 1.0f;
 float SBR_W1 = 9.0f;
+
+static const int IS_TBL_LO = -7;
+static const int IS_TBL_HI =  7;
+static const int IS_TBL_N  = 15;
+static const int IS_TBL_SLOTS = 8;
+
+static const uint16_t IS_TBL_CODE[IS_TBL_SLOTS][IS_TBL_N] = {
+    { 0x681, 0x683, 0x0D1, 0x035, 0x00C, 0x003, 0x000, 0x002,
+      0x007, 0x002, 0x01B, 0x069, 0x1A1, 0x680, 0x682 },
+    { 0, 0, 0, 0, 0x034, 0x01B, 0x007, 0x000,
+      0x002, 0x00C, 0x035, 0, 0, 0, 0 },
+    { 0, 0, 0, 0x013, 0x001, 0x005, 0x007, 0x001,
+      0x006, 0x000, 0x008, 0x012, 0, 0, 0 },
+    { 0, 0, 0, 0, 0x004, 0x003, 0x006, 0x002,
+      0x001, 0x007, 0x000, 0x005, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0, 0x00D, 0x000,
+      0x001, 0x002, 0x007, 0x00C, 0, 0, 0 },
+    { 0, 0, 0x009, 0x003, 0x002, 0x000, 0x006, 0x007,
+      0x005, 0, 0, 0x008, 0, 0, 0 },
+    { 0, 0, 0, 0x01C, 0x006, 0x000, 0x001, 0x002,
+      0x00F, 0x01D, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0x000, 0x001, 0x005, 0x003,
+      0x001, 0x004, 0x001, 0, 0, 0, 0 },
+};
+
+static const uint8_t IS_TBL_LEN[IS_TBL_SLOTS][IS_TBL_N] = {
+    { 11, 11, 8, 6, 4, 3, 2, 2, 3, 3, 5, 7, 9, 11, 11 },
+    {  0,  0, 0, 0, 6, 5, 3, 1, 2, 4, 6, 0, 0,  0,  0 },
+    {  0,  0, 0, 5, 3, 3, 3, 2, 3, 3, 4, 5, 0,  0,  0 },
+    {  0,  0, 0, 0, 5, 4, 3, 2, 2, 3, 3, 5, 0,  0,  0 },
+    {  0,  0, 0, 0, 0, 0, 4, 2, 2, 2, 3, 4, 0,  0,  0 },
+    {  0,  0, 5, 3, 2, 2, 3, 3, 4, 0, 0, 5, 0,  0,  0 },
+    {  0,  0, 0, 5, 3, 2, 2, 2, 4, 5, 0, 0, 0,  0,  0 },
+    {  0,  0, 0, 0, 4, 3, 3, 2, 2, 3, 4, 0, 0,  0,  0 },
+};
+
+static int select_best_is_table(const std::vector<int>& syms)
+{
+    int best_table = 0;
+    int best_cost  = INT_MAX;
+    for (int t = 0; t < IS_TBL_SLOTS; ++t) {
+        bool can_encode = true;
+        int  cost = 0;
+        for (int sym : syms) {
+            int s = std::clamp(sym, IS_TBL_LO, IS_TBL_HI);
+            int idx = s - IS_TBL_LO;
+            uint8_t len = IS_TBL_LEN[t][idx];
+            if (len == 0) { can_encode = false; break; }
+            cost += len;
+        }
+        if (!can_encode) continue;
+        if (cost < best_cost) { best_cost = cost; best_table = t; }
+    }
+    return best_table;
+}
+
+static const uint16_t IS_INV_HUFF_CODE[16] = {
+    0x1, 0x0, 0x5, 0x6, 0x4, 0x19, 0x1B, 0x9,
+    0x7, 0x1A, 0x18, 0x1F, 0x5, 0x1E, 0x8, 0x0E
+};
+static const uint8_t IS_INV_HUFF_LEN[16] = {
+    1, 3, 4, 5, 4, 6, 6, 6, 4, 6, 6, 7, 5, 7, 6, 6
+};
+
+static const uint16_t ACTIVE_HUFF_CODE[16] = {
+    0x001, 0x002, 0x000, 0x003, 0x07D, 0x03F, 0x006, 0x001,
+    0x01E, 0x0F8, 0x00E, 0x003, 0x0F9, 0x002, 0x002, 0x001
+};
+static const uint8_t ACTIVE_HUFF_LEN[16] = {
+    2,  5,  6,  5, 12, 11, 8,  3, 10, 13, 9,  6, 13, 7,  6,  1
+};
+
+static const uint16_t MODE_MS_HUFF_CODE[16] = {
+    0x01, 0x00, 0x0F, 0x0C, 0x0D, 0x04, 0x14, 0x15,
+    0x01, 0x09, 0x08, 0x0B, 0x0E, 0x05, 0x03, 0x01
+};
+static const uint8_t MODE_MS_HUFF_LEN[16] = {
+    2, 5, 6, 6, 6, 7, 7, 7, 4, 6, 6, 6, 6, 7, 6, 1
+};
+
+static const uint8_t HUFF_SMALL_LEN_TBL[5]  = { 4, 3, 1, 2, 4 };
+static const uint32_t HUFF_SMALL_CODE_TBL[5] = { 0x5u, 0x3u, 0x1u, 0x0u, 0x4u };
+
+static const uint8_t  HUFF_LARGE_LEN_TBL[7]  = { 5, 3, 3, 1, 3, 4, 5 };
+static const uint32_t HUFF_LARGE_CODE_TBL[7] = {
+    0x15u, 0x04u, 0x07u, 0x00u, 0x06u, 0x0Bu, 0x14u
+};
+
+static const int WPT_HUFF_SLOT_MAP[8] = { 0, 1, 2, 4, 5, 6, 7, 8 };
+
+static inline void write_huffman_small(BitWriterMSB& w, int32_t v) {
+    int idx = v + 2;
+    if ((unsigned)idx > 4u)
+        throw std::runtime_error("WPT Huffman-small: value out of range");
+    w.write_bits(HUFF_SMALL_CODE_TBL[idx], HUFF_SMALL_LEN_TBL[idx]);
+}
+
+static inline void write_huffman_small_batch4(BitWriterMSB& w,
+                                              int32_t v0, int32_t v1,
+                                              int32_t v2, int32_t v3)
+{
+    int i0 = v0 + 2, i1 = v1 + 2, i2 = v2 + 2, i3 = v3 + 2;
+    if ((unsigned)i0 > 4u || (unsigned)i1 > 4u ||
+        (unsigned)i2 > 4u || (unsigned)i3 > 4u)
+        throw std::runtime_error("WPT Huffman-small: value out of range");
+
+    int l0 = HUFF_SMALL_LEN_TBL[i0];
+    int l1 = HUFF_SMALL_LEN_TBL[i1];
+    int l2 = HUFF_SMALL_LEN_TBL[i2];
+    int l3 = HUFF_SMALL_LEN_TBL[i3];
+
+    uint32_t code = HUFF_SMALL_CODE_TBL[i0];
+    code = (code << l1) | HUFF_SMALL_CODE_TBL[i1];
+    code = (code << l2) | HUFF_SMALL_CODE_TBL[i2];
+    code = (code << l3) | HUFF_SMALL_CODE_TBL[i3];
+    w.write_bits(code, l0 + l1 + l2 + l3);
+}
+
+static inline void write_huffman_small_vec(BitWriterMSB& w,
+                                           const std::vector<int32_t>& qv)
+{
+    const size_t n = qv.size();
+    size_t j = 0;
+    for (; j + 4 <= n; j += 4)
+        write_huffman_small_batch4(w, qv[j], qv[j+1], qv[j+2], qv[j+3]);
+    for (; j < n; ++j)
+        write_huffman_small(w, qv[j]);
+}
+
+static inline void write_huffman_large(BitWriterMSB& w, int32_t v) {
+    int idx = v + 3;
+    if ((unsigned)idx > 6u)
+        throw std::runtime_error("WPT Huffman-large: value out of range");
+    w.write_bits(HUFF_LARGE_CODE_TBL[idx], HUFF_LARGE_LEN_TBL[idx]);
+}
+
+static inline void write_huffman_large_batch4(BitWriterMSB& w,
+                                              int32_t v0, int32_t v1,
+                                              int32_t v2, int32_t v3)
+{
+    int i0 = v0 + 3, i1 = v1 + 3, i2 = v2 + 3, i3 = v3 + 3;
+    if ((unsigned)i0 > 6u || (unsigned)i1 > 6u ||
+        (unsigned)i2 > 6u || (unsigned)i3 > 6u)
+        throw std::runtime_error("WPT Huffman-large: value out of range");
+
+    int l0 = HUFF_LARGE_LEN_TBL[i0];
+    int l1 = HUFF_LARGE_LEN_TBL[i1];
+    int l2 = HUFF_LARGE_LEN_TBL[i2];
+    int l3 = HUFF_LARGE_LEN_TBL[i3];
+
+    uint32_t code = HUFF_LARGE_CODE_TBL[i0];
+    code = (code << l1) | HUFF_LARGE_CODE_TBL[i1];
+    code = (code << l2) | HUFF_LARGE_CODE_TBL[i2];
+    code = (code << l3) | HUFF_LARGE_CODE_TBL[i3];
+    w.write_bits(code, l0 + l1 + l2 + l3);
+}
+
+static inline void write_huffman_large_vec(BitWriterMSB& w,
+                                           const std::vector<int32_t>& qv)
+{
+    const size_t n = qv.size();
+    size_t j = 0;
+    for (; j + 4 <= n; j += 4)
+        write_huffman_large_batch4(w, qv[j], qv[j+1], qv[j+2], qv[j+3]);
+    for (; j < n; ++j)
+        write_huffman_large(w, qv[j]);
+}
+
+static inline void write_wpt_huff(BitWriterMSB& w, int32_t sym, int slot) {
+    int idx = (int)sym - WPT_COEFF_HUFF_LO;
+    if ((unsigned)idx >= 255u)
+        throw std::runtime_error("WPT Huffman: symbol out of range");
+    uint8_t len = WPT_COEFF_HUFF_LEN[slot][idx];
+    if (len == 0)
+        throw std::runtime_error("WPT Huffman: symbol not in table");
+    w.write_bits(WPT_COEFF_HUFF_CODE[slot][idx], len);
+}
+
+static inline void write_wpt_huff_vec(BitWriterMSB& w,
+                                      const std::vector<int32_t>& qv, int slot)
+{
+    for (int32_t v : qv) write_wpt_huff(w, v, slot);
+}
+
+static inline void write_kidx_huff(BitWriterMSB& w, uint32_t sym, int slot) {
+    if (sym > 16u)
+        throw std::runtime_error("kidx Huffman: symbol out of range");
+    uint8_t len = KIDX_COEFF_HUFF_LEN[slot][sym];
+    if (len == 0)
+        throw std::runtime_error("kidx Huffman: symbol not in table");
+    w.write_bits(KIDX_COEFF_HUFF_CODE[slot][sym], len);
+}
+
+static int select_best_kidx_slot(const std::vector<uint32_t>& vals) {
+    if (vals.empty()) return 0;
+    int best_slot = 0;
+    int best_bits = INT_MAX;
+    for (int s = 0; s < 8; ++s) {
+        int bits = 0;
+        bool ok = true;
+        for (uint32_t v : vals) {
+            if (v > 16u) { ok = false; break; }
+            uint8_t len = KIDX_COEFF_HUFF_LEN[s][v];
+            if (len == 0) { ok = false; break; }
+            bits += len;
+        }
+        if (ok && bits < best_bits) { best_bits = bits; best_slot = s; }
+    }
+    return best_slot;
+}
+
+struct CLIOptions {
+    std::string input_file;
+    std::string output_file;
+
+    float    target_kbps   = SETTINGS.default_target_kbps;
+    size_t   read_buffer   = 8192;
+    int      is_base       = -1;
+    float    sbr_w0        = 1.0f;
+    float    sbr_w1        = 9.0f;
+    bool     speed_mode    = false;
+
+    int      block_mode    = 0;
+    bool     enable_ms     = true;
+    bool     enable_is     = true;
+    bool     enable_sbr    = true;
+
+    uint32_t max_blocks    = 0;
+    bool     verbose       = false;
+};
+
+static void print_help_encoder()
+{
+    std::cout <<
+R"(Usage: encoder <input.wav> [options]
+
+Required:
+  <input.wav>                  Path to input WAV file
+
+Bitrate:
+  --bitrate <kbps>             Target bitrate (default: 64, max: 452)
+
+Block mode:
+  --long-only                  Force 2048-sample long blocks (tonal / stable)
+  --short-only                 Force 1024-sample short blocks (percussive)
+  (default)                    Auto: short on detected transients
+
+Stereo tools:
+  --no-ms                      Disable mid/side for regular (low) bands
+  --no-is                      Disable intensity stereo for high bands
+  --no-sbr                     Disable SBR high-frequency continuation
+  --sbr-weights <w0> <w1>      SBR spectral shape weights (default 1 9).
+  --is-base <n>                -1 = adaptive (default), 0 = disabled, >0 = fixed
+
+Preprocessing:
+  --speed, --no-pow            Disable POW preprocessing (faster encode).
+
+I/O:
+  --read-buffer <samples>      I/O chunk size (default 8192)
+  --output <path>              Output file (default <input>.wha)
+  --max-blocks <n>             Stop after n blocks (debug)
+
+Logging:
+  --quiet, -q                  Suppress progress (Default)
+  --verbose, -v                Verbose
+  --help, -h                   Show this help
+)";
+}
+
+static bool parse_encoder_args(int argc, char** argv, CLIOptions& o)
+{
+    if (argc < 2) return false;
+    o.input_file = argv[1];
+    if (o.input_file == "--help" || o.input_file == "-h") { print_help_encoder(); return false; }
+    o.enable_ms = SETTINGS.enable_ms;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        auto need = [&](const char* what) -> bool {
+            if (i + 1 >= argc) { std::cerr << "Option " << what << " requires a value\n"; return false; }
+            return true;
+        };
+        if      (a == "--help" || a == "-h") { print_help_encoder(); return false; }
+        else if (a == "--bitrate")    { if(!need("--bitrate")) return false; o.target_kbps = std::stof(argv[++i]); }
+        else if (a == "--read-buffer"){ if(!need("--read-buffer")) return false; o.read_buffer = std::stoul(argv[++i]); if (o.read_buffer < 256) o.read_buffer = 256; }
+        else if (a == "--is-base")    { if(!need("--is-base")) return false; o.is_base = std::stoi(argv[++i]); }
+        else if (a == "--output")     { if(!need("--output")) return false; o.output_file = argv[++i]; }
+        else if (a == "--max-blocks") { if(!need("--max-blocks")) return false; o.max_blocks = (uint32_t)std::stoul(argv[++i]); }
+        else if (a == "--sbr-weights") {
+            if (i + 2 >= argc) { std::cerr << "--sbr-weights needs 2 values\n"; return false; }
+            o.sbr_w0 = std::stof(argv[++i]);
+            o.sbr_w1 = std::stof(argv[++i]);
+        }
+        else if (a == "--speed" || a == "--no-pow") o.speed_mode = true;
+        else if (a == "--long-only")   o.block_mode = 1;
+        else if (a == "--short-only")  o.block_mode = 2;
+        else if (a == "--no-ms")       o.enable_ms  = false;
+        else if (a == "--no-is")       o.enable_is  = false;
+        else if (a == "--no-sbr")      o.enable_sbr = false;
+        else if (a == "--quiet" || a == "-q")   o.verbose = false;
+        else if (a == "--verbose" || a == "-v") o.verbose = true;
+        else { std::cerr << "Unknown option: " << a << "\n"; return false; }
+    }
+
+    if (o.output_file.empty()) {
+        o.output_file = o.input_file;
+        if (o.output_file.size() > 3) o.output_file.resize(o.output_file.size() - 3);
+        o.output_file += "wha";
+    }
+    return true;
+}
 
 static int get_adaptive_is_max_base(float target_kbps, const EncoderSettings& s)
 {
@@ -45,26 +360,16 @@ static int get_adaptive_is_max_base(float target_kbps, const EncoderSettings& s)
         return base_default;
     if (target_kbps < s.adaptive_is_kbps_min || target_kbps > s.adaptive_is_kbps_max)
         return base_default;
-    
-    float k0, k1;
-    int b0, b1;
-    if (target_kbps <= 64.0f) {
-        k0 = k1 = target_kbps;
-        b0 = b1 = s.adaptive_is_base_at_64;
-    } else if (target_kbps <= 96.0f) {
-        k0 = 64.0f; k1 = 96.0f;
-        b0 = s.adaptive_is_base_at_64; b1 = s.adaptive_is_base_at_96;
-    } else if (target_kbps <= 128.0f) {
-        k0 = 96.0f; k1 = 128.0f;
-        b0 = s.adaptive_is_base_at_96; b1 = s.adaptive_is_base_at_128;
-    } else {
-        k0 = 128.0f; k1 = 160.0f;
-        b0 = s.adaptive_is_base_at_128; b1 = s.adaptive_is_base_at_160;
-    }
-    
+
+    float k0, k1; int b0, b1;
+    if (target_kbps <= 64.0f)       { k0 = k1 = target_kbps; b0 = b1 = s.adaptive_is_base_at_64; }
+    else if (target_kbps <= 96.0f)  { k0 = 64.0f;  k1 = 96.0f;  b0 = s.adaptive_is_base_at_64;  b1 = s.adaptive_is_base_at_96; }
+    else if (target_kbps <= 128.0f) { k0 = 96.0f;  k1 = 128.0f; b0 = s.adaptive_is_base_at_96;  b1 = s.adaptive_is_base_at_128; }
+    else if (target_kbps <= 160.0f) { k0 = 128.0f; k1 = 160.0f; b0 = s.adaptive_is_base_at_128; b1 = s.adaptive_is_base_at_160; }
+    else                            { k0 = 160.0f; k1 = 660.0f; b0 = s.adaptive_is_base_at_160; b1 = s.adaptive_is_base_at_660; }
+
     float t = 0.0f;
-    if (std::abs(k1 - k0) > 1e-6f)
-        t = (target_kbps - k0) / (k1 - k0);
+    if (std::abs(k1 - k0) > 1e-6f) t = (target_kbps - k0) / (k1 - k0);
     t = std::clamp(t, 0.0f, 1.0f);
     int b = (int)std::lround((float)b0 + t * (float)(b1 - b0));
     b = std::max(b, base_default);
@@ -81,11 +386,12 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     int sr,
     int block_size,
     bool enable_ms,
+    bool enable_sbr,
+    bool enable_is,
     bool block_is_full,
     uint32_t block_index,
     PredContext& pred_ctx)
 {
-    const float eps = 1e-12f;
     const bool stereo = (num_channels == 2);
     std::vector<std::vector<float>> left_coeffs, right_coeffs;
     std::vector<int> coeff_counts;
@@ -93,20 +399,15 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     if (stereo) {
         size_t spc = block.size() / 2;
         std::vector<float> left(spc), right(spc);
-        for (size_t i = 0; i < spc; ++i) {
-            left[i] = block[i * 2];
-            right[i] = block[i * 2 + 1];
-        }
-        left_coeffs = wpt.wpt(left, level, target_kbps, sr, num_channels);
+        for (size_t i = 0; i < spc; ++i) { left[i] = block[i*2]; right[i] = block[i*2+1]; }
+        left_coeffs  = wpt.wpt(left,  level, target_kbps, sr, num_channels);
         right_coeffs = wpt.wpt(right, level, target_kbps, sr, num_channels);
         coeff_counts.resize(left_coeffs.size());
-        for (size_t i = 0; i < left_coeffs.size(); ++i)
-            coeff_counts[i] = (int)left_coeffs[i].size();
+        for (size_t i = 0; i < left_coeffs.size(); ++i) coeff_counts[i] = (int)left_coeffs[i].size();
     } else {
         left_coeffs = wpt.wpt(block, level, target_kbps, sr, num_channels);
         coeff_counts.resize(left_coeffs.size());
-        for (size_t i = 0; i < left_coeffs.size(); ++i)
-            coeff_counts[i] = (int)left_coeffs[i].size();
+        for (size_t i = 0; i < left_coeffs.size(); ++i) coeff_counts[i] = (int)left_coeffs[i].size();
     }
 
     int band_count = (int)coeff_counts.size();
@@ -117,18 +418,14 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     bool can_state_pred = false;
     if (pred_state.ready && block_index > pred_state.last_bi) {
         uint32_t age = block_index - pred_state.last_bi;
-        if (age <= SAME_MODE_PRED_MAX_AGE)
-            can_state_pred = true;
+        if (age <= SAME_MODE_PRED_MAX_AGE) can_state_pred = true;
     }
 
-    bool use_is = (stereo && target_kbps < 510.0f);
+    bool use_is = (stereo && enable_is && target_kbps < 510.0f);
     std::vector<uint8_t> mode_ms(band_count, 0);
     std::vector<uint8_t> is_band(band_count, 0);
     std::vector<std::vector<float>> ch0_bands(band_count);
     std::vector<std::vector<float>> ch1_bands(band_count);
-    std::vector<std::vector<float>> ch0_original(band_count);
-    for (int i = 0; i < band_count; ++i)
-        ch0_original[i] = left_coeffs[i];
 
     int is_start_default = band_count;
     int is_start_max = band_count;
@@ -140,8 +437,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     if (use_is) {
         is_start_default = get_is_start_band(target_kbps, total_bands);
-        if (is_start_default >= band_count)
-            use_is = false;
+        if (is_start_default >= band_count) use_is = false;
     }
 
     bool adaptive_is = false;
@@ -160,41 +456,32 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
+    int is_seg_threshold = get_is_segmented_threshold(target_kbps, total_bands);
+
     if (stereo) {
         int low_end = use_is ? is_start_default : band_count;
         for (int i = 0; i < low_end; ++i) {
             const auto& lb = left_coeffs[i];
             const auto& rb = right_coeffs[i];
             int n = (int)lb.size();
-            if (n == 0) {
-                ch0_bands[i] = lb;
-                ch1_bands[i] = rb;
-                continue;
-            }
-            float El = 0, Er = 0, Em = 0, Es = 0;
-            for (int j = 0; j < n; ++j) {
-                El += lb[j] * lb[j];
-                Er += rb[j] * rb[j];
-            }
-            auto [mid, side] = mid_side(lb, rb);
-            for (int j = 0; j < n; ++j) {
-                Em += mid[j] * mid[j];
-                Es += side[j] * side[j];
-            }
+            if (n == 0) { ch0_bands[i] = lb; ch1_bands[i] = rb; continue; }
+            float El = 0, Er = 0, cross = 0;
+            for (int j = 0; j < n; ++j) { El += lb[j]*lb[j]; Er += rb[j]*rb[j]; cross += lb[j]*rb[j]; }
+            float Em = (El + Er + 2.0f*cross) * 0.25f;
+            float Es = (El + Er - 2.0f*cross) * 0.25f;
             if (use_mid_side(El, Er, Em, Es, enable_ms, target_kbps)) {
                 mode_ms[i] = 1;
-                ch0_bands[i] = std::move(mid);
-                ch1_bands[i] = std::move(side);
+                ch0_bands[i].resize(n); ch1_bands[i].resize(n);
+                for (int j = 0; j < n; ++j) {
+                    ch0_bands[i][j] = (lb[j] + rb[j]) * 0.5f;
+                    ch1_bands[i][j] = (lb[j] - rb[j]) * 0.5f;
+                }
             } else {
-                mode_ms[i] = 0;
-                ch0_bands[i] = lb;
-                ch1_bands[i] = rb;
+                mode_ms[i] = 0; ch0_bands[i] = lb; ch1_bands[i] = rb;
             }
         }
 
         if (use_is) {
-            BandEnergy be = compute_band_energy(ch0_bands, ch1_bands, is_band, stereo, band_count);
-            int is_seg_threshold = 8 * total_bands / 16;
             for (int i = is_start_default; i < band_count; ++i) {
                 bool force_is = !adaptive_is || (i >= is_start_max);
                 bool choose_is = force_is;
@@ -203,37 +490,32 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                         left_coeffs[i], right_coeffs[i], enable_ms, target_kbps,
                         SETTINGS.is_strong_ratio_threshold,
                         SETTINGS.is_equal_ratio_threshold,
-                        SETTINGS.is_equal_ratio_threshold_low_bitrate);
+                        SETTINGS.is_equal_ratio_threshold_low_bitrate, i, band_count);
                 }
                 if (choose_is) {
-                    is_band[i] = 1;
-                    mode_ms[i] = 1;
-                    std::array<float, 4> r_arr;
-                    std::array<bool, 4> inv_arr;
+                    is_band[i] = 1; mode_ms[i] = 1;
+                    std::array<float, 4> r_arr; std::array<bool, 4> inv_arr;
                     bool use_segmented;
                     std::vector<float> Y;
-                    compute_is_parameters_ex(
-                        left_coeffs[i], right_coeffs[i], Y, r_arr,
-                        inv_arr, use_segmented, i, total_bands);
+                    compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r_arr,
+                                             inv_arr, use_segmented, i, total_bands, is_seg_threshold);
                     is_r_vals[i] = r_arr;
                     is_inv_flags[i] = inv_arr;
                     is_use_segmented[i] = (i < is_seg_threshold);
                     ch0_bands[i] = std::move(Y);
-                    ch1_bands[i] = ch0_bands[i];
                 } else {
-                    is_band[i] = 0;
-                    mode_ms[i] = 0;
-                    auto [mid, side] = mid_side(left_coeffs[i], right_coeffs[i]);
-                    ch0_bands[i] = mid;
-                    ch1_bands[i] = side;
+                    is_band[i] = 0; mode_ms[i] = 0;
+                    int n = (int)left_coeffs[i].size();
+                    ch0_bands[i].resize(n); ch1_bands[i].resize(n);
+                    for (int j = 0; j < n; ++j) {
+                        ch0_bands[i][j] = (left_coeffs[i][j] + right_coeffs[i][j]) * 0.5f;
+                        ch1_bands[i][j] = (left_coeffs[i][j] - right_coeffs[i][j]) * 0.5f;
+                    }
                 }
             }
         }
     } else {
-        for (int i = 0; i < band_count; ++i) {
-            ch0_bands[i] = left_coeffs[i];
-            ch1_bands[i].clear();
-        }
+        for (int i = 0; i < band_count; ++i) { ch0_bands[i] = left_coeffs[i]; ch1_bands[i].clear(); }
     }
 
     BandEnergy be = compute_band_energy(ch0_bands, ch1_bands, is_band, stereo, band_count);
@@ -245,31 +527,33 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         energy0, energy1, band_count, stereo, SETTINGS.transient_ratio_threshold);
     apply_adaptive_pow(energy0, energy1, band_count, stereo, target_kbps, has_transient);
     apply_narrowband_correction(energy0, energy1, band_count, stereo);
-    apply_highfreq_attenuation(
-        energy0, energy1, band_count, target_kbps, num_channels, has_transient);
+    apply_highfreq_attenuation(energy0, energy1, band_count, target_kbps, num_channels, has_transient);
 
     static std::vector<std::vector<float>> prev_ch0, prev_ch1;
+    static thread_local std::vector<const std::vector<float>*> ch0_views, ch1_views;
+    ch0_views.resize(band_count); ch1_views.resize(band_count);
+    if (stereo) {
+        for (int i = 0; i < band_count; ++i) {
+            ch0_views[i] = &ch0_bands[i];
+            ch1_views[i] = is_band[i] ? &ch0_bands[i] : &ch1_bands[i];
+        }
+    } else {
+        for (int i = 0; i < band_count; ++i) ch0_views[i] = &ch0_bands[i];
+    }
+
     std::vector<float> priority0, priority1;
     if (stereo) {
-        priority0 = compute_channel_priority(
-            ch0_bands, prev_ch0, coeff_counts, target_kbps, sr, level, false);
-        priority1 = compute_channel_priority(
-            ch1_bands, prev_ch1, coeff_counts, target_kbps, sr, level, true);
+        priority0 = compute_channel_priority(ch0_views, prev_ch0, coeff_counts, target_kbps, sr, level, false, num_channels);
+        priority1 = compute_channel_priority(ch1_views, prev_ch1, coeff_counts, target_kbps, sr, level, true,  num_channels);
     } else {
-        priority0 = compute_channel_priority(
-            ch0_bands, prev_ch0, coeff_counts, target_kbps, sr, level, false);
+        priority0 = compute_channel_priority(ch0_views, prev_ch0, coeff_counts, target_kbps, sr, level, false, num_channels);
         priority1.assign(band_count, 0.0f);
     }
 
-    std::vector<int> min_bits(band_count, 0);
-    std::vector<int> max_bits(band_count, 10);
+    std::vector<int> min_bits(band_count, 0), max_bits(band_count, 10);
     if (use_is) {
         for (int i = 0; i < band_count; ++i) {
-            if (is_band[i]) {
-                min_bits[i] = 0;
-                priority1[i] = 0.0f;
-                energy1[i] = 0.0f;
-            }
+            if (is_band[i]) { min_bits[i] = 0; priority1[i] = 0.0f; energy1[i] = 0.0f; }
         }
     }
 
@@ -286,17 +570,31 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<int> bits0 = std::move(alloc.bits0);
     std::vector<int> bits1 = std::move(alloc.bits1);
 
+    float total_energy = 0.0f;
+    for (int i = 0; i < band_count; ++i) {
+        total_energy += energy0[i];
+        if (stereo) total_energy += energy1[i];
+    }
+    bool is_low_bitrate = (target_kbps <= 80.0f);
+    float silence_threshold = is_low_bitrate ? 1e-6f : 1e-7f;
+    bool is_silent_block = (total_energy < silence_threshold);
+
     std::vector<bool> active0(band_count), active1(band_count);
     for (int i = 0; i < band_count; ++i) {
         if (stereo && is_band[i]) bits1[i] = 0;
-        active0[i] = (bits0[i] > 0);
-        if (stereo) active1[i] = (!is_band[i] && bits1[i] > 0);
-        else active1[i] = false;
+        if (is_silent_block) { active0[i] = false; active1[i] = false; }
+        else {
+            active0[i] = (bits0[i] > 0);
+            if (stereo) active1[i] = (!is_band[i] && bits1[i] > 0);
+            else        active1[i] = false;
+        }
+        if (!active0[i]) bits0[i] = 0;
+        if (!active1[i]) bits1[i] = 0;
     }
 
-    int sbr_end = block_is_full ? (14 * band_count / 16) : 0;
-    SBREncodeResult sbr = sbr_analyze(
-        ch0_original, active0, sbr_end, band_count, SBR_W0, SBR_W1);
+    int sbr_end = (enable_sbr && block_is_full) ? (14 * band_count / 16) : 0;
+
+    SBREncodeResult sbr = sbr_analyze(left_coeffs, active0, sbr_end, band_count, SBR_W0, SBR_W1);
 
     std::vector<uint8_t> header;
     std::vector<std::vector<std::vector<float>>> for_quant0(1);
@@ -310,7 +608,7 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         qres1 = quantize_levels(for_quant1, bits1, target_kbps, num_channels);
     }
 
-    std::vector<uint32_t> scale_raw0, scale_raw1, scale_pred0, scale_pred1;
+    std::vector<uint32_t> scale_pred0, scale_pred1;
     std::vector<uint32_t> full_scale0(band_count, 0), full_scale1(band_count, 0);
     for (int i = 0; i < band_count; ++i) {
         if (active0[i]) {
@@ -318,208 +616,238 @@ std::vector<uint8_t> compress_block_adaptive_joint(
             float step = scale_and_bits_to_step(qres0.scales[i], bits0[i]);
             uint32_t idx = get_scale_idx(step, sb);
             full_scale0[i] = idx;
-            scale_raw0.push_back(idx);
-            if (can_state_pred) {
-                uint32_t val = idx;
-                if (i < (int)pred_state.prev_active0.size() && pred_state.prev_active0[i]) {
-                    int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale0[i];
-                    val = zigzag_encode(d);
-                }
-                scale_pred0.push_back(val);
+            uint32_t val = idx;
+            if (i < (int)pred_state.prev_active0.size() && pred_state.prev_active0[i]) {
+                int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale0[i];
+                val = zigzag_encode(d);
             }
+            scale_pred0.push_back(val);
         }
         if (stereo && active1[i]) {
             int sb = get_scale_bits(i);
             float step = scale_and_bits_to_step(qres1.scales[i], bits1[i]);
             uint32_t idx = get_scale_idx(step, sb);
             full_scale1[i] = idx;
-            scale_raw1.push_back(idx);
-            if (can_state_pred) {
-                uint32_t val = idx;
-                if (i < (int)pred_state.prev_active1.size() && pred_state.prev_active1[i]) {
-                    int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale1[i];
-                    val = zigzag_encode(d);
-                }
-                scale_pred1.push_back(val);
+            uint32_t val = idx;
+            if (i < (int)pred_state.prev_active1.size() && pred_state.prev_active1[i]) {
+                int32_t d = (int32_t)idx - (int32_t)pred_state.prev_scale1[i];
+                val = zigzag_encode(d);
             }
+            scale_pred1.push_back(val);
         }
     }
 
-    int k_scale0_raw = compute_optimal_rice_k(scale_raw0);
-    int k_scale1_raw = stereo ? compute_optimal_rice_k(scale_raw1) : 0;
-    size_t raw_scale_bits = estimate_rice_bits(scale_raw0, k_scale0_raw) +
-                            (stereo ? estimate_rice_bits(scale_raw1, k_scale1_raw) : 0);
-
-    int k_scale0_pred = 0;
-    int k_scale1_pred = 0;
-    size_t pred_scale_bits = SIZE_MAX;
-    if (can_state_pred) {
-        k_scale0_pred = compute_optimal_rice_k(scale_pred0);
-        k_scale1_pred = stereo ? compute_optimal_rice_k(scale_pred1) : 0;
-        pred_scale_bits = estimate_rice_bits(scale_pred0, k_scale0_pred) +
-                          (stereo ? estimate_rice_bits(scale_pred1, k_scale1_pred) : 0);
-    }
-
-    bool use_scale_pred = can_state_pred && (pred_scale_bits < raw_scale_bits);
-    int k_scale0 = use_scale_pred ? k_scale0_pred : k_scale0_raw;
-    int k_scale1 = use_scale_pred ? k_scale1_pred : k_scale1_raw;
-
-    auto scale_vals0 = use_scale_pred ? std::move(scale_pred0) : std::move(scale_raw0);
-    auto scale_vals1 = use_scale_pred ? std::move(scale_pred1) : std::move(scale_raw1);
+    int k_scale0 = compute_optimal_rice_k(scale_pred0);
+    int k_scale1 = stereo ? compute_optimal_rice_k(scale_pred1) : 0;
+    auto scale_vals0 = std::move(scale_pred0);
+    auto scale_vals1 = std::move(scale_pred1);
 
     uint8_t k_scale_byte = (uint8_t)(k_scale0 & 0x07);
     if (stereo) k_scale_byte |= ((k_scale1 & 0x07) << 3);
     if (block_is_full) k_scale_byte |= 0x80;
-    if (use_scale_pred) k_scale_byte |= 0x40;
     header.push_back(k_scale_byte);
 
     BitWriterMSB payload_writer;
-    uint32_t packed_mode = 0;
-    uint32_t packed_active0 = 0;
-    for (int i = 0; i < band_count; ++i) {
-        packed_mode = (packed_mode << 1) | mode_ms[i];
-        packed_active0 = (packed_active0 << 1) | (active0[i] ? 1 : 0);
+
+    for (int i = 0; i < band_count; i += 4) {
+        int nibble = 0;
+        for (int s = 0; s < 4; ++s) { int idx = i + s; nibble <<= 1; if (idx < band_count && mode_ms[idx]) nibble |= 1; }
+        payload_writer.write_bits(MODE_MS_HUFF_CODE[nibble], MODE_MS_HUFF_LEN[nibble]);
     }
-    payload_writer.write_bits(packed_mode, band_count);
-    payload_writer.write_bits(packed_active0, band_count);
+    for (int i = 0; i < band_count; i += 4) {
+        int nibble = 0;
+        for (int s = 0; s < 4; ++s) { int idx = i + s; nibble <<= 1; if (idx < band_count && active0[idx]) nibble |= 1; }
+        payload_writer.write_bits(ACTIVE_HUFF_CODE[nibble], ACTIVE_HUFF_LEN[nibble]);
+    }
 
     if (stereo) {
         int is_start = use_is ? get_is_start_band(target_kbps, total_bands) : band_count;
-        uint32_t packed_active1 = 0;
-        int non_is_count = 0;
+        std::vector<int> idx_list;
         for (int i = 0; i < band_count; ++i) {
             bool is_is_band = use_is && (i >= is_start) && mode_ms[i];
-            if (!is_is_band) {
-                packed_active1 = (packed_active1 << 1) | (active1[i] ? 1 : 0);
-                non_is_count++;
-            }
+            if (!is_is_band) idx_list.push_back(i);
         }
-        if (non_is_count > 0) {
-            payload_writer.write_bits(packed_active1, non_is_count);
+        int non_is_count = (int)idx_list.size();
+        for (int j = 0; j < non_is_count; j += 4) {
+            int nibble = 0;
+            for (int s = 0; s < 4; ++s) {
+                int idx = j + s; nibble <<= 1;
+                if (idx < non_is_count && active1[idx_list[idx]]) nibble |= 1;
+            }
+            payload_writer.write_bits(ACTIVE_HUFF_CODE[nibble], ACTIVE_HUFF_LEN[nibble]);
         }
     }
 
-    for (uint32_t v : scale_vals0)
-        rice_encode(payload_writer, std::vector<uint32_t>{v}, k_scale0);
-    if (stereo) {
-        for (uint32_t v : scale_vals1)
-            rice_encode(payload_writer, std::vector<uint32_t>{v}, k_scale1);
-    }
+    rice_encode(payload_writer, scale_vals0, k_scale0);
+    if (stereo) rice_encode(payload_writer, scale_vals1, k_scale1);
 
     std::vector<uint32_t> k_sub_vals0, k_sub_vals1;
-    std::vector<int> k_sub_per_band0(band_count, 0), k_sub_per_band1(band_count, 0);
+    std::vector<int> k_rice0(band_count, 0), k_rice1(band_count, 0);
+    std::vector<uint8_t> mode0(band_count, 0), mode1(band_count, 0);
     std::vector<std::vector<uint32_t>> uvals0(band_count), uvals1(band_count);
-    k_sub_vals0.reserve(band_count);
-    if (stereo) k_sub_vals1.reserve(band_count);
+
+    auto decide_band = [&](const std::vector<int32_t>& qvals,
+                           std::vector<uint32_t>& uv,
+                           int& k_rice_out) -> uint8_t {
+        const size_t n = qvals.size();
+        uv.resize(n);
+        for (size_t j = 0; j < n; ++j) uv[j] = zigzag_encode(qvals[j]);
+        int k_rice = compute_optimal_rice_k(uv);
+        if (k_rice > 6) k_rice = 6;
+        k_rice_out = k_rice;
+
+        int rice_bits = 0;
+        for (size_t j = 0; j < n; ++j)
+            rice_bits += (int)(uv[j] >> k_rice) + 1 + k_rice;
+
+        int best_bits = rice_bits;
+        uint8_t best_mode = (uint8_t)(10 + k_rice);
+
+        if (n > 0) {
+            int bits = 0; bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                int idx = (int)qvals[j] + 2;
+                if ((unsigned)idx > 4u) { ok = false; break; }
+                bits += HUFF_SMALL_LEN_TBL[idx];
+            }
+            if (ok && bits < best_bits) { best_bits = bits; best_mode = 0; }
+        }
+
+        if (n > 0) {
+            int bits = 0; bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                int idx = (int)qvals[j] + 3;
+                if ((unsigned)idx > 6u) { ok = false; break; }
+                bits += HUFF_LARGE_LEN_TBL[idx];
+            }
+            if (ok && bits < best_bits) { best_bits = bits; best_mode = 1; }
+        }
+
+        for (int s = 0; s < 8; ++s) {
+            int slot = WPT_HUFF_SLOT_MAP[s];
+            int bits = 0; bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                int sym = (int)qvals[j];
+                int idx = sym - WPT_COEFF_HUFF_LO;
+                if ((unsigned)idx >= 255u) { ok = false; break; }
+                uint8_t len = WPT_COEFF_HUFF_LEN[slot][idx];
+                if (len == 0) { ok = false; break; }
+                bits += len;
+            }
+            if (ok && bits < best_bits) { best_bits = bits; best_mode = (uint8_t)(2 + s); }
+        }
+
+        return best_mode;
+    };
 
     for (int i = 0; i < band_count; ++i) {
-        if (active0[i] && bits0[i] > 0) {
-            const auto& qvals = qres0.quantized_per_level[i];
-            auto& uv = uvals0[i];
-            uv.resize(qvals.size());
-            for (size_t j = 0; j < qvals.size(); ++j)
-                uv[j] = zigzag_encode(qvals[j]);
-            int k_sub = compute_optimal_rice_k(uv);
-            k_sub_per_band0[i] = k_sub;
-            k_sub_vals0.push_back(k_sub);
+        if (active0[i]) {
+            int k_rice = 0;
+            uint8_t mode = decide_band(qres0.quantized_per_level[i], uvals0[i], k_rice);
+            k_rice0[i] = k_rice;
+            mode0[i]   = mode;
+            k_sub_vals0.push_back((uint32_t)mode);
         }
-        if (stereo && active1[i] && bits1[i] > 0) {
-            const auto& qvals = qres1.quantized_per_level[i];
-            auto& uv = uvals1[i];
-            uv.resize(qvals.size());
-            for (size_t j = 0; j < qvals.size(); ++j)
-                uv[j] = zigzag_encode(qvals[j]);
-            int k_sub = compute_optimal_rice_k(uv);
-            k_sub_per_band1[i] = k_sub;
-            k_sub_vals1.push_back(k_sub);
+        if (stereo && active1[i]) {
+            int k_rice = 0;
+            uint8_t mode = decide_band(qres1.quantized_per_level[i], uvals1[i], k_rice);
+            k_rice1[i] = k_rice;
+            mode1[i]   = mode;
+            k_sub_vals1.push_back((uint32_t)mode);
         }
     }
 
-    int k_sub_k0 = k_sub_vals0.empty() ? 0 : std::min(compute_optimal_rice_k(k_sub_vals0), 3);
-    int k_sub_k1 = 0;
-    if (stereo && !k_sub_vals1.empty())
-        k_sub_k1 = std::min(compute_optimal_rice_k(k_sub_vals1), 3);
+    int kidx_slot0 = select_best_kidx_slot(k_sub_vals0);
+    int kidx_slot1 = stereo ? select_best_kidx_slot(k_sub_vals1) : 0;
 
-    payload_writer.write_bits(k_sub_k0, 2);
-    if (stereo) payload_writer.write_bits(k_sub_k1, 2);
-    rice_encode(payload_writer, k_sub_vals0, k_sub_k0);
-    if (stereo) rice_encode(payload_writer, k_sub_vals1, k_sub_k1);
+    payload_writer.write_bits((uint32_t)kidx_slot0, 3);
+    if (stereo) payload_writer.write_bits((uint32_t)kidx_slot1, 3);
+
+    for (uint32_t v : k_sub_vals0) write_kidx_huff(payload_writer, v, kidx_slot0);
+    if (stereo) for (uint32_t v : k_sub_vals1) write_kidx_huff(payload_writer, v, kidx_slot1);
 
     for (int i = 0; i < band_count; ++i) {
-        if (active0[i] && bits0[i] > 0)
-            rice_encode(payload_writer, uvals0[i], k_sub_per_band0[i]);
+        if (!active0[i]) continue;
+        uint8_t m = mode0[i];
+        if (m == 0) {
+            write_huffman_small_vec(payload_writer, qres0.quantized_per_level[i]);
+        } else if (m == 1) {
+            write_huffman_large_vec(payload_writer, qres0.quantized_per_level[i]);
+        } else if (m < 10) {
+            int slot = WPT_HUFF_SLOT_MAP[m - 2];
+            write_wpt_huff_vec(payload_writer, qres0.quantized_per_level[i], slot);
+        } else {
+            rice_encode(payload_writer, uvals0[i], k_rice0[i]);
+        }
     }
     if (stereo) {
         for (int i = 0; i < band_count; ++i) {
-            if (active1[i] && bits1[i] > 0)
-                rice_encode(payload_writer, uvals1[i], k_sub_per_band1[i]);
+            if (!active1[i]) continue;
+            uint8_t m = mode1[i];
+            if (m == 0) {
+                write_huffman_small_vec(payload_writer, qres1.quantized_per_level[i]);
+            } else if (m == 1) {
+                write_huffman_large_vec(payload_writer, qres1.quantized_per_level[i]);
+            } else if (m < 10) {
+                int slot = WPT_HUFF_SLOT_MAP[m - 2];
+                write_wpt_huff_vec(payload_writer, qres1.quantized_per_level[i], slot);
+            } else {
+                rice_encode(payload_writer, uvals1[i], k_rice1[i]);
+            }
         }
     }
 
     if (use_is) {
         std::vector<int> is_indices;
-        for (int i = 0; i < band_count; ++i)
-            if (is_band[i]) is_indices.push_back(i);
-
+        for (int i = 0; i < band_count; ++i) if (is_band[i]) is_indices.push_back(i);
         if (!is_indices.empty()) {
-            int segmented_threshold = 8 * total_bands / 16;
-            int total_vals = 0;
-            for (int idx : is_indices)
-                total_vals += (idx < segmented_threshold) ? 4 : 1;
-
-            uint32_t current_chunk = 0;
-            int bits_in_chunk = 0;
             for (int i : is_indices) {
-                bool is_seg = (i < segmented_threshold);
-                int bits_to_add = is_seg ? 4 : 1;
-                for (int s = 0; s < bits_to_add; ++s) {
-                    int val = is_seg ? (is_inv_flags[i][s] ? 1 : 0) : (is_inv_flags[i][0] ? 1 : 0);
-                    current_chunk = (current_chunk << 1) | val;
-                    bits_in_chunk++;
-                    if (bits_in_chunk == 32) {
-                        payload_writer.write_bits(current_chunk, 32);
-                        current_chunk = 0;
-                        bits_in_chunk = 0;
-                    }
+                if (i < is_seg_threshold) {
+                    int nibble = 0;
+                    for (int s = 0; s < 4; ++s) nibble = (nibble << 1) | (is_inv_flags[i][s] ? 1 : 0);
+                    payload_writer.write_bits(IS_INV_HUFF_CODE[nibble], IS_INV_HUFF_LEN[nibble]);
+                } else {
+                    payload_writer.write_bits(is_inv_flags[i][0] ? 1u : 0u, 1);
                 }
             }
-            if (bits_in_chunk > 0) {
-                payload_writer.write_bits(current_chunk, bits_in_chunk);
-            }
-
-            std::vector<uint32_t> is_zz_vals;
-            is_zz_vals.reserve(total_vals);
+            std::vector<int> coeff_syms;
+            coeff_syms.reserve(is_indices.size() * 4);
             for (int i : is_indices) {
                 int bits = get_r_bits(i);
                 if (is_use_segmented[i]) {
                     for (int s = 0; s < 4; ++s) {
-                        int32_t q = quantize_r_centered(is_r_vals[i][s], bits);
-                        is_zz_vals.push_back(zigzag_encode(q));
+                        int sym = quantize_r_centered(is_r_vals[i][s], bits);
+                        coeff_syms.push_back(std::clamp(sym, IS_TBL_LO, IS_TBL_HI));
                     }
                 } else {
-                    int32_t q = quantize_r_centered(is_r_vals[i][0], bits);
-                    is_zz_vals.push_back(zigzag_encode(q));
+                    int sym = quantize_r_centered(is_r_vals[i][0], bits);
+                    coeff_syms.push_back(std::clamp(sym, IS_TBL_LO, IS_TBL_HI));
                 }
             }
-            int k_is = compute_optimal_rice_k(is_zz_vals);
-            payload_writer.write_bits(k_is & 0x07, 3);
-            rice_encode(payload_writer, is_zz_vals, k_is);
+            int best_table = select_best_is_table(coeff_syms);
+            payload_writer.write_bits((uint32_t)best_table, 3);
+            for (int sym : coeff_syms) {
+                int idx = sym - IS_TBL_LO;
+                payload_writer.write_bits(IS_TBL_CODE[best_table][idx], IS_TBL_LEN[best_table][idx]);
+            }
         }
     }
 
     if (sbr_end > 0) {
         std::vector<int> sbr_indices;
-        for (int i = 0; i < sbr_end; ++i)
-            if (!active0[i]) sbr_indices.push_back(i);
+        for (int i = 0; i < sbr_end; ++i) if (!active0[i]) sbr_indices.push_back(i);
         if (!sbr_indices.empty())
             sbr_write_to_stream(payload_writer, sbr, sbr_indices, can_state_pred, pred_state);
     }
 
     payload_writer.flush();
     auto payload = payload_writer.data();
-    uint16_t payload_len = (uint16_t)payload.size();
-    header.push_back(payload_len & 0xFF);
-    header.push_back((payload_len >> 8) & 0xFF);
+    if (payload.size() >= 0x8000) throw std::runtime_error("Block payload exceeds 32767 bytes");
+
+    uint16_t payload_len_field = (uint16_t)payload.size();
+    if (level != 5) payload_len_field |= 0x8000;
+    header.push_back(payload_len_field & 0xFF);
+    header.push_back((payload_len_field >> 8) & 0xFF);
 
     std::vector<uint8_t> out = header;
     out.insert(out.end(), payload.begin(), payload.end());
@@ -527,12 +855,10 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     pred_state.prev_scale0 = full_scale0;
     pred_state.prev_scale1 = full_scale1;
     pred_state.prev_active0.assign(band_count, 0);
-    for (int i = 0; i < band_count; ++i)
-        if (active0[i]) pred_state.prev_active0[i] = 1;
+    for (int i = 0; i < band_count; ++i) if (active0[i]) pred_state.prev_active0[i] = 1;
     if (stereo) {
         pred_state.prev_active1.assign(band_count, 0);
-        for (int i = 0; i < band_count; ++i)
-            if (active1[i]) pred_state.prev_active1[i] = 1;
+        for (int i = 0; i < band_count; ++i) if (active1[i]) pred_state.prev_active1[i] = 1;
     } else {
         pred_state.prev_active1.assign(band_count, 0);
     }
@@ -542,14 +868,12 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     for (int i = 0; i < sbr_end && i < band_count; ++i) {
         if (!active0[i]) {
             pred_state.prev_sbr_valid[i] = 1;
-            pred_state.prev_sbr_rms[i] = sbr.rms_idx[i];
+            pred_state.prev_sbr_rms[i]   = sbr.rms_idx[i];
             pred_state.prev_sbr_noise[i] = sbr.noise_flag[i] ? 1 : 0;
         }
     }
-
     pred_state.ready = true;
     pred_state.last_bi = block_index;
-
     return out;
 }
 
@@ -561,42 +885,34 @@ void save_compressed_buffered(
     int num_channels,
     float target_kbps,
     uint32_t total_frames,
-    bool speed_mode, 
+    bool speed_mode,
+    uint8_t coding_flags,
+    float sbr_w0,
+    float sbr_w1,
     size_t write_buffer_blocks = 8192)
 {
     std::ofstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot create output file");
 
     f.write("WHA1", 4);
-    uint8_t version = 24;
+    uint8_t version = 30;
     f.write((char*)&version, 1);
+    f.write((char*)&coding_flags, 1);
+    f.write((char*)&sbr_w0, 4);
+    f.write((char*)&sbr_w1, 4);
+
     f.write((char*)&sr, 4);
-    uint8_t ch = (uint8_t)num_channels;
-    f.write((char*)&ch, 1);
-    uint32_t block_count = (uint32_t)blocks.size();
-    f.write((char*)&block_count, 4);
+    uint8_t ch = (uint8_t)num_channels; f.write((char*)&ch, 1);
+    uint32_t block_count = (uint32_t)blocks.size(); f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 24;
+    uint8_t block_format_version = 36;
     f.write((char*)&block_format_version, 1);
     f.write((char*)&total_frames, 4);
 
-    uint8_t flags = speed_mode ? 0x01 : 0x00;
-    f.write((char*)&flags, 1);
-
-    int mode_bytes = ((int)block_count + 7) / 8;
-    std::vector<uint8_t> mode_packed(mode_bytes, 0);
-    for (uint32_t i = 0; i < block_count; ++i)
-        if (block_modes[i]) mode_packed[i / 8] |= (1 << (i % 8));
-    f.write((char*)mode_packed.data(), mode_bytes);
-
     std::vector<uint8_t> write_buffer;
     write_buffer.reserve(write_buffer_blocks * 4096);
-
     auto flush_buffer = [&]() {
-        if (!write_buffer.empty()) {
-            f.write((char*)write_buffer.data(), write_buffer.size());
-            write_buffer.clear();
-        }
+        if (!write_buffer.empty()) { f.write((char*)write_buffer.data(), write_buffer.size()); write_buffer.clear(); }
     };
 
     for (uint32_t i = 0; i < block_count; ++i) {
@@ -604,26 +920,22 @@ void save_compressed_buffered(
         uint16_t len = (uint16_t)blk.size();
         write_buffer.insert(write_buffer.end(), (char*)&len, (char*)&len + 2);
         write_buffer.insert(write_buffer.end(), blk.begin(), blk.end());
-        if (write_buffer.size() >= write_buffer_blocks * 4096)
-            flush_buffer();
+        if (write_buffer.size() >= write_buffer_blocks * 4096) flush_buffer();
     }
     flush_buffer();
     f.close();
 
     int long_blocks = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v24 to " << path << " ("
+    std::cout << "Saved container v30/block v35 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
-              << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no") << ")" << std::endl;
+              << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no")
+              << ", flags=0x" << std::hex << (int)coding_flags << std::dec << ")" << std::endl;
 }
 
 std::tuple<std::vector<std::vector<uint8_t>>, uint32_t, int, float, uint32_t, std::vector<bool>, bool>
-compress_audio_streaming(
-    const std::string& input_path,
-    float target_kbps_in,
-    size_t read_buffer_size_samples = 8192,
-    bool speed_mode = false) 
+compress_audio_streaming(const std::string& input_path, const CLIOptions& opts)
 {
     uint32_t sr, channels;
     drwav wav;
@@ -635,7 +947,7 @@ compress_audio_streaming(
     uint64_t total_frames = wav.totalPCMFrameCount;
     int num_channels = (int)channels;
 
-    float target_kbps = (target_kbps_in > 0) ? target_kbps_in : SETTINGS.default_target_kbps;
+    float target_kbps = (opts.target_kbps > 0) ? opts.target_kbps : SETTINGS.default_target_kbps;
     float per_channel_kbps = target_kbps / num_channels;
     float overlap_factor = (per_channel_kbps <= 0.0f) ? 2.0/3.0f : 1.0f;
 
@@ -645,9 +957,8 @@ compress_audio_streaming(
     PredContext pred_ctx;
 
     std::unique_ptr<PowCodec> pow_enc;
-    if (!speed_mode) {
+    if (!opts.speed_mode)
         pow_enc = std::make_unique<PowCodec>(num_channels, 0.85f, target_kbps / float(num_channels));
-    }
 
     int current_pos = 0;
     int prev_block_size = 1024;
@@ -656,72 +967,52 @@ compress_audio_streaming(
     int max_reservoir = (int)(bits_per_sample * 2048 * 0.3);
 
     std::vector<float> audio_buffer;
+    size_t audio_head = 0;
     size_t buffer_start = 0;
     bool eof = false;
     bool pow_flushed = false;
 
-    std::vector<float> analyze_buf, block, read_chunk(read_buffer_size_samples * num_channels);
+    std::vector<float> analyze_buf, block;
+    std::vector<float> read_chunk(opts.read_buffer * num_channels);
     std::vector<float> processed_buf, tail_buf;
 
-    struct WindowCache {
-        std::vector<float> buf;
-        int bs = 0;
-        int lo = -1;
-        int ro = -1;
-    };
+    struct WindowCache { std::vector<float> buf; int bs = 0, lo = -1, ro = -1; };
     WindowCache win_long, win_short;
 
     auto get_window = [&](int bs, int lo, int ro) -> const std::vector<float>& {
         WindowCache& wc = (bs == 2048) ? win_long : win_short;
         if (wc.bs != bs || wc.lo != lo || wc.ro != ro) {
             wc.buf.assign(bs, 1.0f);
-            if (lo > 1) {
-                for (int i = 0; i < lo; ++i) {
-                    float t = (float)i / lo;
-                    wc.buf[i] = t * t * (3.0f - 2.0f * t);
-                }
-            }
-            if (ro > 1) {
-                for (int i = 0; i < ro; ++i) {
-                    float t = (float)i / ro;
-                    wc.buf[bs - 1 - i] = t * t * (3.0f - 2.0f * t);
-                }
-            }
-            wc.bs = bs;
-            wc.lo = lo;
-            wc.ro = ro;
+            if (lo > 1) for (int i = 0; i < lo; ++i) { float t = (float)i/lo; wc.buf[i] = t*t*(3.0f-2.0f*t); }
+            if (ro > 1) for (int i = 0; i < ro; ++i) { float t = (float)i/ro; wc.buf[bs-1-i] = t*t*(3.0f-2.0f*t); }
+            wc.bs = bs; wc.lo = lo; wc.ro = ro;
         }
         return wc.buf;
     };
 
     auto ensure_data_available = [&](int needed_pos) {
-        while ((int)(buffer_start + audio_buffer.size() / num_channels) < needed_pos) {
+        while ((int)(buffer_start + (audio_buffer.size() - audio_head) / num_channels) < needed_pos) {
             if (eof) {
                 if (!pow_flushed) {
                     pow_flushed = true;
-                    if (!speed_mode && pow_enc) {
-                        tail_buf.clear();
-                        pow_enc->flush(tail_buf);
+                    if (!opts.speed_mode && pow_enc) {
+                        tail_buf.clear(); pow_enc->flush(tail_buf);
                         audio_buffer.insert(audio_buffer.end(), tail_buf.begin(), tail_buf.end());
                         if (!tail_buf.empty()) continue;
                     }
                 }
                 break;
             }
-
             drwav_uint64 frames_read = drwav_read_pcm_frames_f32(
-                &wav, read_buffer_size_samples, read_chunk.data());
-            if (frames_read == 0) {
-                eof = true;
-                continue;
-            }
-
-            if (!speed_mode) {
+                &wav, opts.read_buffer, read_chunk.data());
+            if (frames_read == 0) { eof = true; continue; }
+            if (!opts.speed_mode) {
                 processed_buf.clear();
                 pow_enc->process(read_chunk.data(), (size_t)frames_read, processed_buf);
                 audio_buffer.insert(audio_buffer.end(), processed_buf.begin(), processed_buf.end());
             } else {
-                audio_buffer.insert(audio_buffer.end(), read_chunk.begin(), read_chunk.begin() + frames_read * num_channels);
+                audio_buffer.insert(audio_buffer.end(), read_chunk.begin(),
+                                    read_chunk.begin() + frames_read * num_channels);
             }
         }
     };
@@ -729,36 +1020,32 @@ compress_audio_streaming(
     ensure_data_available(2048);
 
     while (current_pos < (int)total_frames) {
+        if (opts.max_blocks > 0 && blocks_raw.size() >= opts.max_blocks) break;
+
         int analyze_len = std::min(2048, (int)total_frames - current_pos);
         ensure_data_available(current_pos + analyze_len);
-        if ((int)(buffer_start + audio_buffer.size() / num_channels) <= current_pos)
-            break;
+        if ((int)(buffer_start + (audio_buffer.size() - audio_head) / num_channels) <= current_pos) break;
 
-        analyze_buf.assign(analyze_len * num_channels, 0.0f);
-        size_t offset = (current_pos - (int)buffer_start) * num_channels;
+        size_t need_an = (size_t)analyze_len * num_channels;
+        if (analyze_buf.size() != need_an) analyze_buf.resize(need_an);
+        std::memset(analyze_buf.data(), 0, need_an * sizeof(float));
+        size_t offset = audio_head + (current_pos - (int)buffer_start) * num_channels;
         if (offset + analyze_buf.size() <= audio_buffer.size()) {
-            std::copy(
-                audio_buffer.begin() + offset,
-                audio_buffer.begin() + offset + analyze_buf.size(),
-                analyze_buf.begin());
+            std::copy(audio_buffer.begin() + offset, audio_buffer.begin() + offset + analyze_buf.size(), analyze_buf.begin());
         } else {
             size_t avail = audio_buffer.size() - offset;
             std::copy(audio_buffer.begin() + offset, audio_buffer.end(), analyze_buf.begin());
         }
 
-        bool is_transient = detect_transient_block_stereo(analyze_buf, num_channels);
+        bool is_transient;
+        if      (opts.block_mode == 1) is_transient = false;
+        else if (opts.block_mode == 2) is_transient = true;
+        else                           is_transient = detect_transient_block_stereo(analyze_buf, num_channels);
 
         // is_transient = false;
         int block_size, right_overlap, level;
-        if (is_transient) {
-            block_size = 1024;
-            right_overlap = (int)(48 * overlap_factor);
-            level = 4;
-        } else {
-            block_size = 2048;
-            right_overlap = (int)(96 * overlap_factor);
-            level = 5;
-        }
+        if (is_transient) { block_size = 1024; right_overlap = (int)(48 * overlap_factor); level = 4; }
+        else              { block_size = 2048; right_overlap = (int)(96 * overlap_factor); level = 5; }
 
         int left_overlap = (prev_block_size == 2048)
             ? (int)(96 * overlap_factor)
@@ -767,34 +1054,39 @@ compress_audio_streaming(
 
         ensure_data_available(current_pos + block_size);
 
-        block.assign(block_size * num_channels, 0.0f);
-        size_t offset_block = (current_pos - (int)buffer_start) * num_channels;
-        size_t avail_block = audio_buffer.size() - offset_block;
+        size_t need_blk = (size_t)block_size * num_channels;
+        if (block.size() != need_blk) block.resize(need_blk);
+        std::memset(block.data(), 0, need_blk * sizeof(float));
+
+        size_t offset_block = audio_head + (current_pos - (int)buffer_start) * num_channels;
+        size_t avail_block = (offset_block < audio_buffer.size()) ? (audio_buffer.size() - offset_block) : 0;
         if (avail_block > 0) {
             size_t copy_samples = std::min(avail_block, block.size());
-            std::copy(
-                audio_buffer.begin() + offset_block,
-                audio_buffer.begin() + offset_block + copy_samples,
-                block.begin());
+            std::copy(audio_buffer.begin() + offset_block,
+                      audio_buffer.begin() + offset_block + copy_samples, block.begin());
         }
 
         const std::vector<float>& window = get_window(block_size, left_overlap, right_overlap);
-        for (int c = 0; c < num_channels; ++c) {
-            for (int i = 0; i < block_size; ++i)
-                block[i * num_channels + c] *= window[i];
+        if (num_channels == 2) {
+            for (int i = 0; i < block_size; ++i) {
+                float w = window[i];
+                block[i*2] *= w; block[i*2+1] *= w;
+            }
+        } else {
+            for (int i = 0; i < block_size; ++i) block[i] *= window[i];
         }
 
         bool block_is_full = (current_pos + block_size <= (int)total_frames);
         int target_bits = (int)(bits_per_sample * hop);
         if (target_bits < 256) target_bits = 256;
         int effective_budget = target_bits + reservoir;
-        if (effective_budget > target_bits + max_reservoir)
-            effective_budget = target_bits + max_reservoir;
+        if (effective_budget > target_bits + max_reservoir) effective_budget = target_bits + max_reservoir;
 
         uint32_t block_index = (uint32_t)blocks_raw.size();
         auto comp = compress_block_adaptive_joint(
             block, wpt, num_channels, level, effective_budget, target_kbps, sr,
-            block_size, SETTINGS.enable_ms, block_is_full, block_index, pred_ctx);
+            block_size, opts.enable_ms, opts.enable_sbr, opts.enable_is,
+            block_is_full, block_index, pred_ctx);
 
         int real_bits = (int)comp.size() * 8;
         reservoir += target_bits - real_bits;
@@ -804,7 +1096,7 @@ compress_audio_streaming(
         blocks_raw.push_back(std::move(comp));
         block_modes.push_back(!is_transient);
 
-        if (SETTINGS.verbose && (blocks_raw.size() % 10 == 0)) {
+        if (opts.verbose && (blocks_raw.size() % 10 == 0)) {
             std::cout << "[Block " << blocks_raw.size() << "] size=" << block_size
                       << ", mode=" << (is_transient ? "short" : "long")
                       << ", bytes=" << blocks_raw.back().size()
@@ -816,102 +1108,69 @@ compress_audio_streaming(
 
         int keep_start = current_pos - left_overlap;
         if (keep_start < 0) keep_start = 0;
-        size_t remove_samples = (keep_start - (int)buffer_start) * num_channels;
-        if (remove_samples > 0 && remove_samples <= audio_buffer.size()) {
-            audio_buffer.erase(audio_buffer.begin(), audio_buffer.begin() + remove_samples);
+        size_t remove_samples = (size_t)(keep_start - (int)buffer_start) * num_channels;
+        if (remove_samples > 0 && audio_head + remove_samples <= audio_buffer.size()) {
+            audio_head += remove_samples;
             buffer_start = keep_start;
+            if (audio_head > 16384 && audio_head * 2 > audio_buffer.size()) {
+                audio_buffer.erase(audio_buffer.begin(), audio_buffer.begin() + audio_head);
+                audio_head = 0;
+            }
         }
-
         ensure_data_available(current_pos + 2048);
     }
 
     drwav_uninit(&wav);
+
+    uint32_t frames_out = (opts.max_blocks > 0 && blocks_raw.size() >= opts.max_blocks)
+                          ? 0u : (uint32_t)current_pos;
 
     return {
         std::move(blocks_raw),
         sr,
         num_channels,
         target_kbps,
-        (uint32_t)total_frames,
+        frames_out,
         std::move(block_modes),
-        speed_mode
+        opts.speed_mode
     };
 }
 
-#include <sys/resource.h>
-
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::cerr << "Usage: ./encoder <input.wav> [bitrate_kbps] [read_buffer_samples] [is_max_base] [sbr_w0] [sbr_w1] [--speed]\n";
+    CLIOptions opts;
+    if (!parse_encoder_args(argc, argv, opts)) return 1;
+
+    if (opts.target_kbps > 452.0f) {
+        std::cerr << "Bitrate isn't supported (max 452 kbps)\n";
         return 1;
     }
 
-    std::vector<char*> args;
-    bool speed_mode = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--speed") {
-            speed_mode = true;
-        } else {
-            args.push_back(argv[i]);
-        }
-    }
-    
-    int new_argc = args.size() + 1;
-    char** new_argv = args.data();
-
-    std::string input_file = new_argv[0];
-    std::string out_container = input_file;
-    for (int64_t i = 0; i < 3; i++) out_container.pop_back();
-    out_container += "wha";
-
-    float target_kbps = SETTINGS.default_target_kbps;
-    if (new_argc >= 3) target_kbps = std::stof(new_argv[1]);
-
-    size_t read_buffer = 8192;
-    if (new_argc >= 4) {
-        try {
-            read_buffer = std::stoul(new_argv[2]);
-            if (read_buffer < 256) read_buffer = 256;
-        } catch (...) {
-            std::cerr << "Invalid read buffer size\n";
-        }
+    if (opts.is_base == 0) {
+        SETTINGS.enable_adaptive_is = false;
+        SETTINGS.adaptive_is_base_override = -1;
+    } else if (opts.is_base > 0) {
+        SETTINGS.enable_adaptive_is = true;
+        SETTINGS.adaptive_is_base_override = opts.is_base;
+    } else {
+        SETTINGS.enable_adaptive_is = true;
+        SETTINGS.adaptive_is_base_override = -1;
     }
 
-    if (new_argc >= 5) {
-        try {
-            int mb = std::stoi(new_argv[3]);
-            if (mb == 0) {
-                SETTINGS.enable_adaptive_is = false;
-                SETTINGS.adaptive_is_base_override = -1;
-            } else if (mb > 0) {
-                SETTINGS.enable_adaptive_is = true;
-                SETTINGS.adaptive_is_base_override = mb;
-            } else {
-                SETTINGS.enable_adaptive_is = true;
-                SETTINGS.adaptive_is_base_override = -1;
-            }
-        } catch (...) {
-            SETTINGS.enable_adaptive_is = true;
-            SETTINGS.adaptive_is_base_override = -1;
-        }
-    }
-
-    if (new_argc >= 6) { try { SBR_W0 = std::stof(new_argv[4]); } catch (...) {} }
-    if (new_argc >= 7) { try { SBR_W1 = std::stof(new_argv[5]); } catch (...) {} }
+    SBR_W0 = opts.sbr_w0;
+    SBR_W1 = opts.sbr_w1;
 
     std::cout << "SBR Shape Weights: W0=" << SBR_W0
               << ", W1=" << SBR_W1
               << " (Contrast: " << (20.0f * std::log10(SBR_W1 / SBR_W0)) << " dB)\n";
-              
-    if (speed_mode) {
-        std::cout << ">>> SPEED MODE ENABLED: Pre-processing DISABLED (Flag will be saved to container) <<<\n";
-    }
+
+    if (opts.speed_mode)
+        std::cout << ">>> SPEED MODE: POW preprocessing DISABLED (saved to container) <<<\n";
 
     struct rusage usage_before, usage_after;
     getrusage(RUSAGE_SELF, &usage_before);
 
-    auto comp = compress_audio_streaming(input_file, target_kbps, read_buffer, speed_mode);
+    auto comp = compress_audio_streaming(opts.input_file, opts);
     auto blocks = std::get<0>(comp);
     uint32_t sr = std::get<1>(comp);
     int num_channels = std::get<2>(comp);
@@ -920,9 +1179,20 @@ int main(int argc, char** argv)
     auto block_modes = std::get<5>(comp);
     bool final_speed_mode = std::get<6>(comp);
 
+    uint8_t coding_flags = 0;
+    if (final_speed_mode) coding_flags |= 0x01;
+    if (!opts.enable_ms)  coding_flags |= 0x02;
+
+    bool is_will_be_used = (num_channels == 2) && opts.enable_is && (opts.target_kbps < 510.0f);
+    if (!is_will_be_used) coding_flags |= 0x04;
+
+    if (!opts.enable_sbr) coding_flags |= 0x08;
+    coding_flags |= (uint8_t)((opts.block_mode & 0x03) << 4);
+
     save_compressed_buffered(
-        blocks, block_modes, out_container, sr, num_channels, tk,
-        total_samples, final_speed_mode, read_buffer);
+        blocks, block_modes, opts.output_file, sr, num_channels, tk,
+        total_samples, final_speed_mode, coding_flags,
+        SBR_W0, SBR_W1, opts.read_buffer);
 
     getrusage(RUSAGE_SELF, &usage_after);
     double user_time_sec =
@@ -930,27 +1200,20 @@ int main(int argc, char** argv)
         (usage_after.ru_utime.tv_usec - usage_before.ru_utime.tv_usec) / 1000000.0;
 
     double audio_duration_sec = (total_samples > 0)
-        ? (double)total_samples / (double)sr
-        : 0.0;
+        ? (double)total_samples / (double)sr : 0.0;
 
-    size_t total_file_bytes = 23; 
-    for (const auto& blk : blocks)
-        total_file_bytes += 2 + blk.size();
+    size_t total_file_bytes = 32;
+    for (const auto& blk : blocks) total_file_bytes += 2 + blk.size();
 
     double actual_bitrate_kbps = (audio_duration_sec > 0.0)
-        ? (double)total_file_bytes * 8.0 / 1000.0 / audio_duration_sec
-        : 0.0;
-
-    double realtime_speed = (user_time_sec > 0.0)
-        ? (audio_duration_sec / user_time_sec)
-        : 0.0;
+        ? (double)total_file_bytes * 8.0 / 1000.0 / audio_duration_sec : 0.0;
+    double realtime_speed = (user_time_sec > 0.0) ? (audio_duration_sec / user_time_sec) : 0.0;
 
     std::cout << "Compressed: " << blocks.size() << " blocks, user time=" << user_time_sec << "s\n";
     std::cout << "Audio duration: " << audio_duration_sec << " s\n";
     std::cout << "File size: " << total_file_bytes << " bytes\n";
-    std::cout << "Target bitrate: " << target_kbps << " kbps\n";
+    std::cout << "Target bitrate: " << opts.target_kbps << " kbps\n";
     std::cout << "Actual bitrate: " << actual_bitrate_kbps << " kbps\n";
     std::cout << "Encoding speed: " << realtime_speed << "x realtime\n";
-
     return 0;
 }

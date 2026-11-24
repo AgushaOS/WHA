@@ -146,4 +146,23 @@ inline void apply_inverse_lpc(const std::vector<int32_t>& residual, int order, s
     }
 }
 
+inline uint32_t zigzag_encode(int32_t n) {
+    return (n << 1) ^ (n >> 31);
+}
+
+inline int compute_optimal_rice_k(const std::vector<uint32_t>& vals, int max_k = 7) {
+    int    best_k    = 0;
+    size_t best_bits = SIZE_MAX;
+    for (int k = 0; k <= max_k; ++k) {
+        size_t total = 0;
+        for (uint32_t v : vals)
+            total += (v >> k) + 1 + k;
+        if (total < best_bits) {
+            best_bits = total;
+            best_k    = k;
+        }
+    }
+    return best_k;
+}
+
 #endif // ENTROPY_DECODER_H

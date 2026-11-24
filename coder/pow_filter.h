@@ -12,7 +12,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-inline float fast_powf(float x, float y) {
+inline float powf(float x, float y) {
     if (x <= 0.0f) return 0.0f;
     return std::exp2f(y * std::log2f(x));
 }
@@ -155,38 +155,52 @@ private:
     std::vector<float> win_sq_;
 
     void processFrameInPlace(float* frame) {
-        for (int i = 0; i < NFFT; ++i) in_[i] = frame[i] * win_[i];
+        constexpr float EPS = 1e-20f;
+        constexpr float EPS_SQ = EPS * EPS;
+        constexpr float GAMMA = 0.85f;
+        constexpr float SCALE_EXPONENT = (GAMMA - 1.0f) * 0.5f;
+
+        for (int i = 0; i < NFFT; ++i)
+            in_[i] = frame[i] * win_[i];
 
         fftwf_execute(r2c_);
 
-        alignas(32) float orig_mag[NBINS];
-        float max_mag = 1e-20f; 
+        float max_mag_sq = 0.0f;
+
         for (int i = 0; i < NBINS; ++i) {
             const float re = out_c_[i][0];
             const float im = out_c_[i][1];
-            const float m = std::sqrt(re * re + im * im);
-            orig_mag[i] = m;
-            if (m > max_mag) max_mag = m;
+
+            const float mag_sq = re * re + im * im;
+
+            if (mag_sq > max_mag_sq)
+                max_mag_sq = mag_sq;
         }
+
+        float max_mag = EPS;
+
+        if (max_mag_sq > EPS_SQ)
+            max_mag = std::sqrt(max_mag_sq);
 
         max_mag *= max_mag_multiplier_;
 
-        alignas(32) float mag[NBINS];
-        std::memcpy(mag, orig_mag, sizeof(mag));
-
-        const float inv_max = 1.0f / max_mag;
-        constexpr float GAMMA = 0.85f;
-        for (int i = 0; i < NBINS; ++i) {
-            float n = mag[i] * inv_max;
-            n = fast_powf(n, GAMMA); 
-            mag[i] = n * max_mag;
-        }
+        const float inv_max_sq = 1.0f / (max_mag * max_mag);
 
         for (int i = 0; i < NBINS; ++i) {
-            if (orig_mag[i] > 1e-20f) {
-                const float scale = mag[i] / orig_mag[i];
-                in_c2r_[i][0] = out_c_[i][0] * scale;
-                in_c2r_[i][1] = out_c_[i][1] * scale;
+            const float re = out_c_[i][0];
+            const float im = out_c_[i][1];
+
+            const float mag_sq = re * re + im * im;
+
+            if (mag_sq > EPS_SQ) {
+                const float normalized_sq = mag_sq * inv_max_sq;
+
+                const float scale = powf(
+                    normalized_sq, SCALE_EXPONENT
+                );
+
+                in_c2r_[i][0] = re * scale;
+                in_c2r_[i][1] = im * scale;
             } else {
                 in_c2r_[i][0] = 0.0f;
                 in_c2r_[i][1] = 0.0f;
@@ -195,8 +209,68 @@ private:
 
         fftwf_execute(c2r_);
 
-        constexpr float norm = 1.0f / (float)NFFT;
-        for (int i = 0; i < NFFT; ++i) frame[i] = out_[i] * norm * win_[i];
+        constexpr float norm = 1.0f / static_cast<float>(NFFT);
+
+        for (int i = 0; i < NFFT; ++i)
+            frame[i] = out_[i] * norm * win_[i];
+    }
+
+    void processFrameInPlace1(float* frame) {
+        for (int i = 0; i < NFFT; ++i)
+            in_[i] = frame[i] * win_[i];
+
+        fftwf_execute(r2c_);
+
+        constexpr float EPS = 1e-20f;
+        constexpr float GAMMA = 0.85f;
+
+        float max_mag_sq = EPS * EPS;
+
+        for (int i = 0; i < NBINS; ++i) {
+            const float re = out_c_[i][0];
+            const float im = out_c_[i][1];
+
+            const float m2 = re * re + im * im;
+
+            if (m2 > max_mag_sq)
+                max_mag_sq = m2;
+        }
+
+        const float max_mag =
+            std::sqrt(max_mag_sq) * max_mag_multiplier_;
+
+        const float inv_max = 1.0f / max_mag;
+
+        for (int i = 0; i < NBINS; ++i) {
+            const float re = out_c_[i][0];
+            const float im = out_c_[i][1];
+
+            const float mag_sq = re * re + im * im;
+
+            if (mag_sq > EPS * EPS) {
+                const float orig_mag = std::sqrt(mag_sq);
+
+                const float normalized = orig_mag * inv_max;
+
+                const float shaped_mag =
+                    powf(normalized, GAMMA) * max_mag;
+
+                const float scale = shaped_mag / orig_mag;
+
+                in_c2r_[i][0] = re * scale;
+                in_c2r_[i][1] = im * scale;
+            } else {
+                in_c2r_[i][0] = 0.0f;
+                in_c2r_[i][1] = 0.0f;
+            }
+        }
+
+        fftwf_execute(c2r_);
+
+        constexpr float norm = 1.0f / static_cast<float>(NFFT);
+
+        for (int i = 0; i < NFFT; ++i)
+            frame[i] = out_[i] * norm * win_[i];
     }
 
     void ensureAcc(ChannelState& cs, int64_t end_pos) {
