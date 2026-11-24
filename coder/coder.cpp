@@ -1042,6 +1042,7 @@ compress_audio_streaming(const std::string& input_path, const CLIOptions& opts)
         else if (opts.block_mode == 2) is_transient = true;
         else                           is_transient = detect_transient_block_stereo(analyze_buf, num_channels);
 
+        // is_transient = false;
         int block_size, right_overlap, level;
         if (is_transient) { block_size = 1024; right_overlap = (int)(48 * overlap_factor); level = 4; }
         else              { block_size = 2048; right_overlap = (int)(96 * overlap_factor); level = 5; }
