@@ -20,6 +20,7 @@ class PowCodec {
 public:
     static constexpr int NFFT  = 2048;
     static constexpr int HOP   = 1024;
+    static constexpr int FFT_BATCH = 1;
     static constexpr int NBINS = NFFT / 2 + 1;
     static constexpr int PAD   = NFFT / 2;
 
@@ -41,16 +42,14 @@ public:
          }
 
          in_     = fftwf_alloc_real(NFFT);
-         out_c_  = fftwf_alloc_complex(NBINS);
-         in_c2r_ = fftwf_alloc_complex(NBINS);
-         out_    = fftwf_alloc_real(NFFT);
+         out_    = fftwf_alloc_complex(NBINS);
          
-         if (!in_ || !out_c_ || !in_c2r_ || !out_) throw std::runtime_error("PowCodec: FFTW alloc failed");
+         if (!in_ || !out_) throw std::runtime_error("PowCodec: FFTW alloc failed");
          
          const char* wisdom_file = "fftw_wisdom.dat";
          fftwf_import_wisdom_from_filename(wisdom_file);
-         r2c_ = fftwf_plan_dft_r2c_1d(NFFT, in_, out_c_, FFTW_MEASURE);
-         c2r_ = fftwf_plan_dft_c2r_1d(NFFT, in_c2r_, out_, FFTW_MEASURE);
+         r2c_ = fftwf_plan_dft_r2c_1d(NFFT, in_, out_, FFTW_MEASURE);
+         c2r_ = fftwf_plan_dft_c2r_1d(NFFT, out_, in_, FFTW_MEASURE);
          
          if (!r2c_ || !c2r_) throw std::runtime_error("PowCodec: FFTW plan failed");
          fftwf_export_wisdom_to_filename(wisdom_file);
@@ -62,18 +61,17 @@ public:
              win_[i] = std::sqrt(std::sin((float)(M_PI / 2.0) * s * s));
              win_sq_[i] = win_[i] * win_[i];
          }
-         
+
          for (auto& ch : channels_) {
              ch.queue.reserve(1024 * 1024); 
              ch.acc.reserve(1024 * 1024);
-             ch.wacc.reserve(1024 * 1024);
          }
      }
 
     ~PowCodec() {
         if (r2c_) fftwf_destroy_plan(r2c_);
         if (c2r_) fftwf_destroy_plan(c2r_);
-        fftwf_free(in_); fftwf_free(out_c_); fftwf_free(in_c2r_); fftwf_free(out_);
+        fftwf_free(in_); fftwf_free(out_);
     }
 
     PowCodec(const PowCodec&) = delete;
@@ -90,10 +88,9 @@ public:
             }
             channels_[c].total_in += frames;
         }
-        for (int c = 0; c < num_channels_; ++c) {
-            ch_out_[c].clear();
-            processChannel(channels_[c], ch_out_[c], false);
-        }
+        for (auto& channel_out : ch_out_)
+            channel_out.clear();
+        processChannels(false);
         const size_t n_out = ch_out_.empty() ? 0 : ch_out_[0].size();
         size_t out_old_size = out.size();
         out.resize(out_old_size + n_out * num_channels_);
@@ -105,10 +102,9 @@ public:
     }
 
     void flush(std::vector<float>& out) {
-        for (int c = 0; c < num_channels_; ++c) {
-            ch_out_[c].clear();
-            processChannel(channels_[c], ch_out_[c], true);
-        }
+        for (auto& channel_out : ch_out_)
+            channel_out.clear();
+        processChannels(true);
         const size_t n_out = ch_out_.empty() ? 0 : ch_out_[0].size();
         size_t out_old_size = out.size();
         out.resize(out_old_size + n_out * num_channels_);
@@ -127,7 +123,6 @@ private:
     struct ChannelState {
         std::vector<float> queue;
         std::vector<float> acc;
-        std::vector<float> wacc;
         int64_t queue_start = 0;
         int64_t acc_start   = 0;
         int64_t next_frame  = 0;
@@ -147,129 +142,48 @@ private:
     fftwf_plan r2c_{};
     fftwf_plan c2r_{};
     float* in_ = nullptr;
-    fftwf_complex* out_c_ = nullptr;
-    fftwf_complex* in_c2r_ = nullptr;
-    float* out_ = nullptr;
+    fftwf_complex* out_ = nullptr;
     std::vector<float> win_;
     std::vector<float> win_sq_;
 
-    void processFrameInPlace(float* frame) {
+    void processFrame(const float* frame) {
         constexpr float EPS = 1e-20f;
         constexpr float EPS_SQ = EPS * EPS;
-        constexpr float GAMMA = 0.85f;
-        constexpr float SCALE_EXPONENT = (GAMMA - 1.0f) * 0.5f;
-
+        constexpr float SCALE_EXPONENT = (0.85f - 1.0f) * 0.5f;
         for (int i = 0; i < NFFT; ++i)
             in_[i] = frame[i] * win_[i];
-
         fftwf_execute(r2c_);
 
         float max_mag_sq = 0.0f;
-
         for (int i = 0; i < NBINS; ++i) {
-            const float re = out_c_[i][0];
-            const float im = out_c_[i][1];
-
+            const float re = out_[i][0];
+            const float im = out_[i][1];
             const float mag_sq = re * re + im * im;
-
             if (mag_sq > max_mag_sq)
                 max_mag_sq = mag_sq;
         }
 
         float max_mag = EPS;
-
         if (max_mag_sq > EPS_SQ)
             max_mag = std::sqrt(max_mag_sq);
-
         max_mag *= max_mag_multiplier_;
-
         const float inv_max_sq = 1.0f / (max_mag * max_mag);
 
         for (int i = 0; i < NBINS; ++i) {
-            const float re = out_c_[i][0];
-            const float im = out_c_[i][1];
-
+            const float re = out_[i][0];
+            const float im = out_[i][1];
             const float mag_sq = re * re + im * im;
-
             if (mag_sq > EPS_SQ) {
                 const float normalized_sq = mag_sq * inv_max_sq;
-
-                const float scale = powf(
-                    normalized_sq, SCALE_EXPONENT
-                );
-
-                in_c2r_[i][0] = re * scale;
-                in_c2r_[i][1] = im * scale;
+                const float scale = powf(normalized_sq, SCALE_EXPONENT);
+                out_[i][0] = re * scale;
+                out_[i][1] = im * scale;
             } else {
-                in_c2r_[i][0] = 0.0f;
-                in_c2r_[i][1] = 0.0f;
+                out_[i][0] = 0.0f;
+                out_[i][1] = 0.0f;
             }
         }
-
         fftwf_execute(c2r_);
-
-        constexpr float norm = 1.0f / static_cast<float>(NFFT);
-
-        for (int i = 0; i < NFFT; ++i)
-            frame[i] = out_[i] * norm * win_[i];
-    }
-
-    void processFrameInPlace1(float* frame) {
-        for (int i = 0; i < NFFT; ++i)
-            in_[i] = frame[i] * win_[i];
-
-        fftwf_execute(r2c_);
-
-        constexpr float EPS = 1e-20f;
-        constexpr float GAMMA = 0.85f;
-
-        float max_mag_sq = EPS * EPS;
-
-        for (int i = 0; i < NBINS; ++i) {
-            const float re = out_c_[i][0];
-            const float im = out_c_[i][1];
-
-            const float m2 = re * re + im * im;
-
-            if (m2 > max_mag_sq)
-                max_mag_sq = m2;
-        }
-
-        const float max_mag =
-            std::sqrt(max_mag_sq) * max_mag_multiplier_;
-
-        const float inv_max = 1.0f / max_mag;
-
-        for (int i = 0; i < NBINS; ++i) {
-            const float re = out_c_[i][0];
-            const float im = out_c_[i][1];
-
-            const float mag_sq = re * re + im * im;
-
-            if (mag_sq > EPS * EPS) {
-                const float orig_mag = std::sqrt(mag_sq);
-
-                const float normalized = orig_mag * inv_max;
-
-                const float shaped_mag =
-                    powf(normalized, GAMMA) * max_mag;
-
-                const float scale = shaped_mag / orig_mag;
-
-                in_c2r_[i][0] = re * scale;
-                in_c2r_[i][1] = im * scale;
-            } else {
-                in_c2r_[i][0] = 0.0f;
-                in_c2r_[i][1] = 0.0f;
-            }
-        }
-
-        fftwf_execute(c2r_);
-
-        constexpr float norm = 1.0f / static_cast<float>(NFFT);
-
-        for (int i = 0; i < NFFT; ++i)
-            frame[i] = out_[i] * norm * win_[i];
     }
 
     void ensureAcc(ChannelState& cs, int64_t end_pos) {
@@ -277,10 +191,16 @@ private:
         if (end_pos <= cur_end) return;
         const size_t new_size = (size_t)(end_pos - cs.acc_start);
         cs.acc.resize(new_size, 0.0f);
-        cs.wacc.resize(new_size, 0.0f);
     }
 
-    void processChannel(ChannelState& cs, std::vector<float>& out, bool final) {
+    float overlapWeight(int64_t position) const {
+        const size_t phase = static_cast<size_t>(position % HOP);
+        if (position < HOP)
+            return win_sq_[phase];
+        return win_sq_[phase + HOP] + win_sq_[phase];
+    }
+
+    void prepareChannel(ChannelState& cs, bool final) {
         if (!cs.seeded) {
             if (cs.queue.size() < (size_t)PAD + 1 && !final) return;
             const int have = (int)cs.queue.size();
@@ -312,67 +232,115 @@ private:
                 cs.queue.resize(cs.queue.size() + (size_t)PAD, 0.0f);
             }
         }
+    }
 
-        const int64_t input_end = (int64_t)PAD + cs.total_in;
+    void processChannels(bool final) {
+        for (auto& cs : channels_)
+            prepareChannel(cs, final);
+
         while (true) {
-            if (final && cs.next_frame >= input_end) break;
-            int64_t q_idx = cs.next_frame - cs.queue_start;
-            if (q_idx < 0) { cs.queue_start = cs.next_frame; q_idx = 0; }
-            int64_t avail = (int64_t)cs.queue.size() - q_idx;
-            if (avail < NFFT) {
-                if (!final) break;
-                if (avail <= 0 && cs.next_frame >= input_end) break;
-                cs.queue.resize((size_t)(q_idx + NFFT), 0.0f);
+            const int64_t next_frame = channels_[0].next_frame;
+            const int64_t input_end = PAD + channels_[0].total_in;
+            if (final && next_frame >= input_end)
+                break;
+
+            int batch_frames = 0;
+            while (batch_frames < FFT_BATCH) {
+                const int64_t frame_pos = next_frame +
+                    static_cast<int64_t>(batch_frames) * HOP;
+                if (final && frame_pos >= input_end)
+                    break;
+
+                bool frame_available = true;
+                for (int channel = 0; channel < num_channels_; ++channel) {
+                    ChannelState& cs = channels_[channel];
+                    if (cs.next_frame != next_frame ||
+                        cs.total_in != channels_[0].total_in)
+                        throw std::runtime_error("POW channel frame states diverged");
+
+                    int64_t q_idx = frame_pos - cs.queue_start;
+                    if (q_idx < 0) {
+                        cs.queue_start = frame_pos;
+                        q_idx = 0;
+                    }
+                    const int64_t avail =
+                        static_cast<int64_t>(cs.queue.size()) - q_idx;
+                    if (avail < NFFT) {
+                        if (!final) {
+                            frame_available = false;
+                            break;
+                        }
+                        cs.queue.resize(static_cast<size_t>(q_idx + NFFT), 0.0f);
+                    }
+
+                }
+                if (!frame_available)
+                    break;
+                ++batch_frames;
             }
-            alignas(32) float frame[NFFT];
-            std::memcpy(frame, cs.queue.data() + q_idx, NFFT * sizeof(float));
-            processFrameInPlace(frame);
-            ensureAcc(cs, cs.next_frame + NFFT);
-            
-            const int64_t a_idx = cs.next_frame - cs.acc_start;
-            float* __restrict__ acc_ptr = cs.acc.data() + a_idx;
-            float* __restrict__ wacc_ptr = cs.wacc.data() + a_idx;
-            const float* __restrict__ win_ptr = win_sq_.data();
-            for (int i = 0; i < NFFT; ++i) {
-                acc_ptr[i] += frame[i];
-                wacc_ptr[i] += win_ptr[i];
+
+            if (batch_frames == 0 || (!final && batch_frames < FFT_BATCH))
+                break;
+
+            constexpr float norm = 1.0f / static_cast<float>(NFFT);
+            for (int channel = 0; channel < num_channels_; ++channel) {
+                ChannelState& cs = channels_[channel];
+                for (int frame = 0; frame < batch_frames; ++frame) {
+                    const int64_t frame_pos = next_frame +
+                        static_cast<int64_t>(frame) * HOP;
+                    const int64_t q_idx = frame_pos - cs.queue_start;
+                    processFrame(cs.queue.data() + q_idx);
+                    ensureAcc(cs, frame_pos + NFFT);
+                    const int64_t a_idx = frame_pos - cs.acc_start;
+                    float* acc_ptr = cs.acc.data() + a_idx;
+                    for (int i = 0; i < NFFT; ++i)
+                        acc_ptr[i] += in_[i] * norm * win_[i];
+                }
+                cs.next_frame += static_cast<int64_t>(batch_frames) * HOP;
             }
-            cs.next_frame += HOP;
         }
 
-        const int64_t finalized = cs.next_frame;
-        int64_t emit_end = std::min(finalized, input_end);
-        if (emit_end < cs.emitted) emit_end = cs.emitted;
-        out.reserve(out.size() + (emit_end - cs.emitted));
-        for (int64_t p = cs.emitted; p < emit_end; ++p) {
-            if (p < PAD) continue;
-            const int64_t idx = p - cs.acc_start;
-            float v = 0.0f;
-            if (idx >= 0 && idx < (int64_t)cs.acc.size() && cs.wacc[(size_t)idx] > 1e-12f) {
-                v = cs.acc[(size_t)idx] / cs.wacc[(size_t)idx];
+        for (int channel = 0; channel < num_channels_; ++channel) {
+            ChannelState& cs = channels_[channel];
+            std::vector<float>& out = ch_out_[channel];
+            const int64_t input_end = PAD + cs.total_in;
+            const int64_t finalized = cs.next_frame;
+            int64_t emit_end = std::min(finalized, input_end);
+            if (emit_end < cs.emitted)
+                emit_end = cs.emitted;
+            const int64_t emit_start =
+                std::min(emit_end, std::max<int64_t>(cs.emitted, PAD));
+            const size_t output_start = out.size();
+            const size_t output_count = static_cast<size_t>(emit_end - emit_start);
+            out.resize(output_start + output_count);
+            size_t output_idx = output_start;
+            for (int64_t p = emit_start; p < emit_end; ++p) {
+                const int64_t idx = p - cs.acc_start;
+                out[output_idx++] =
+                    cs.acc[static_cast<size_t>(idx)] / overlapWeight(p);
             }
-            out.push_back(v);
-        }
-        cs.emitted = emit_end;
+            cs.emitted = emit_end;
 
-        int64_t q_drop = cs.next_frame - cs.queue_start;
-        if (q_drop > 4096 && q_drop < (int64_t)cs.queue.size()) {
-            size_t drop = (size_t)q_drop;
-            size_t remaining = cs.queue.size() - drop;
-            std::memmove(cs.queue.data(), cs.queue.data() + drop, remaining * sizeof(float));
-            cs.queue.resize(remaining);
-            cs.queue_start += drop;
-        }
+            int64_t q_drop = cs.next_frame - cs.queue_start;
+            if (q_drop > 4096 && q_drop < static_cast<int64_t>(cs.queue.size())) {
+                const size_t drop = static_cast<size_t>(q_drop);
+                const size_t remaining = cs.queue.size() - drop;
+                std::memmove(cs.queue.data(), cs.queue.data() + drop,
+                             remaining * sizeof(float));
+                cs.queue.resize(remaining);
+                cs.queue_start += static_cast<int64_t>(drop);
+            }
 
-        int64_t a_drop = cs.emitted - cs.acc_start;
-        if (a_drop > 4096 && a_drop < (int64_t)cs.acc.size()) {
-            size_t drop = (size_t)a_drop;
-            size_t remaining = cs.acc.size() - drop;
-            std::memmove(cs.acc.data(), cs.acc.data() + drop, remaining * sizeof(float));
-            std::memmove(cs.wacc.data(), cs.wacc.data() + drop, remaining * sizeof(float));
-            cs.acc.resize(remaining);
-            cs.wacc.resize(remaining);
-            cs.acc_start += drop; 
+            const int64_t a_drop = cs.emitted - cs.acc_start;
+            if (a_drop > 4096 && a_drop < static_cast<int64_t>(cs.acc.size())) {
+                const size_t drop = static_cast<size_t>(a_drop);
+                const size_t remaining = cs.acc.size() - drop;
+                std::memmove(cs.acc.data(), cs.acc.data() + drop,
+                             remaining * sizeof(float));
+                cs.acc.resize(remaining);
+                cs.acc_start += static_cast<int64_t>(drop);
+            }
         }
     }
+
 };

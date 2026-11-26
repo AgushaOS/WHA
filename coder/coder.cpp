@@ -75,10 +75,10 @@ static const uint8_t IS_TBL_LEN[IS_TBL_SLOTS][IS_TBL_N] = {
     {  0,  0, 0, 0, 4, 3, 3, 2, 2, 3, 4, 0, 0,  0,  0 },
 };
 
-static int select_best_is_table(const std::vector<int>& syms)
+static int select_best_is_table(const std::vector<int>& syms, int& best_cost)
 {
     int best_table = 0;
-    int best_cost  = INT_MAX;
+    best_cost = INT_MAX;
     for (int t = 0; t < IS_TBL_SLOTS; ++t) {
         bool can_encode = true;
         int  cost = 0;
@@ -397,11 +397,10 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     std::vector<int> coeff_counts;
 
     if (stereo) {
-        size_t spc = block.size() / 2;
-        std::vector<float> left(spc), right(spc);
-        for (size_t i = 0; i < spc; ++i) { left[i] = block[i*2]; right[i] = block[i*2+1]; }
-        left_coeffs  = wpt.wpt(left,  level, target_kbps, sr, num_channels);
-        right_coeffs = wpt.wpt(right, level, target_kbps, sr, num_channels);
+        left_coeffs = wpt.wpt_interleaved(
+            block, 0, level, target_kbps, sr, num_channels);
+        right_coeffs = wpt.wpt_interleaved(
+            block, 1, level, target_kbps, sr, num_channels);
         coeff_counts.resize(left_coeffs.size());
         for (size_t i = 0; i < left_coeffs.size(); ++i) coeff_counts[i] = (int)left_coeffs[i].size();
     } else {
@@ -484,24 +483,22 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         if (use_is) {
             for (int i = is_start_default; i < band_count; ++i) {
                 bool force_is = !adaptive_is || (i >= is_start_max);
-                bool choose_is = force_is;
-                if (!force_is) {
-                    choose_is = should_use_is_band(
-                        left_coeffs[i], right_coeffs[i], enable_ms, target_kbps,
-                        SETTINGS.is_strong_ratio_threshold,
-                        SETTINGS.is_equal_ratio_threshold,
-                        SETTINGS.is_equal_ratio_threshold_low_bitrate, i, band_count);
-                }
+                std::array<float, 4> r_arr;
+                std::array<bool, 4> inv_arr;
+                bool use_segmented;
+                std::vector<float> Y;
+                const bool choose_is = analyze_is_band(
+                    left_coeffs[i], right_coeffs[i], force_is, enable_ms, target_kbps,
+                    SETTINGS.is_strong_ratio_threshold,
+                    SETTINGS.is_equal_ratio_threshold,
+                    SETTINGS.is_equal_ratio_threshold_low_bitrate,
+                    i, band_count, total_bands, is_seg_threshold,
+                    Y, r_arr, inv_arr, use_segmented);
                 if (choose_is) {
                     is_band[i] = 1; mode_ms[i] = 1;
-                    std::array<float, 4> r_arr; std::array<bool, 4> inv_arr;
-                    bool use_segmented;
-                    std::vector<float> Y;
-                    compute_is_parameters_ex(left_coeffs[i], right_coeffs[i], Y, r_arr,
-                                             inv_arr, use_segmented, i, total_bands, is_seg_threshold);
                     is_r_vals[i] = r_arr;
                     is_inv_flags[i] = inv_arr;
-                    is_use_segmented[i] = (i < is_seg_threshold);
+                    is_use_segmented[i] = use_segmented;
                     ch0_bands[i] = std::move(Y);
                 } else {
                     is_band[i] = 0; mode_ms[i] = 0;
@@ -642,40 +639,86 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     auto scale_vals0 = std::move(scale_pred0);
     auto scale_vals1 = std::move(scale_pred1);
 
-    uint8_t k_scale_byte = (uint8_t)(k_scale0 & 0x07);
-    if (stereo) k_scale_byte |= ((k_scale1 & 0x07) << 3);
+    const bool reuse_scale_k = can_state_pred && pred_state.prev_scale_k_valid &&
+        pred_state.prev_scale_k0 == k_scale0 &&
+        (!stereo || pred_state.prev_scale_k1 == k_scale1);
+    uint8_t k_scale_byte = reuse_scale_k
+        ? 0x40
+        : static_cast<uint8_t>((k_scale0 & 0x07) |
+              (stereo ? ((k_scale1 & 0x07) << 3) : 0));
     if (block_is_full) k_scale_byte |= 0x80;
     header.push_back(k_scale_byte);
 
     BitWriterMSB payload_writer;
+    const auto write_mask = [&](size_t source_count, const auto& is_included,
+                                const auto& get_value,
+                                const auto& get_previous,
+                                const uint16_t* codes,
+                                const uint8_t* lengths,
+                                bool prediction_available) {
+        size_t raw_cost = 0;
+        size_t predicted_cost = 0;
+        const auto visit_nibbles = [&](const auto& get_bit, const auto& visit) {
+            int nibble = 0;
+            int nibble_bits = 0;
+            for (size_t idx = 0; idx < source_count; ++idx) {
+                if (!is_included(idx))
+                    continue;
+                nibble = (nibble << 1) | static_cast<int>(get_bit(idx));
+                if (++nibble_bits == 4) {
+                    visit(nibble);
+                    nibble = 0;
+                    nibble_bits = 0;
+                }
+            }
+            if (nibble_bits != 0)
+                visit(nibble << (4 - nibble_bits));
+        };
+        visit_nibbles(get_value,
+                      [&](int nibble) { raw_cost += lengths[nibble]; });
+        if (prediction_available) {
+            visit_nibbles(
+                [&](size_t idx) { return get_value(idx) ^ get_previous(idx); },
+                [&](int nibble) { predicted_cost += lengths[nibble]; });
+        }
 
-    for (int i = 0; i < band_count; i += 4) {
-        int nibble = 0;
-        for (int s = 0; s < 4; ++s) { int idx = i + s; nibble <<= 1; if (idx < band_count && mode_ms[idx]) nibble |= 1; }
-        payload_writer.write_bits(MODE_MS_HUFF_CODE[nibble], MODE_MS_HUFF_LEN[nibble]);
-    }
-    for (int i = 0; i < band_count; i += 4) {
-        int nibble = 0;
-        for (int s = 0; s < 4; ++s) { int idx = i + s; nibble <<= 1; if (idx < band_count && active0[idx]) nibble |= 1; }
-        payload_writer.write_bits(ACTIVE_HUFF_CODE[nibble], ACTIVE_HUFF_LEN[nibble]);
-    }
+        const bool use_prediction =
+            prediction_available && predicted_cost + 1 < raw_cost;
+        if (prediction_available)
+            payload_writer.write_bits(use_prediction ? 1u : 0u, 1);
+        visit_nibbles(
+            [&](size_t idx) {
+                return get_value(idx) ^
+                    (use_prediction && get_previous(idx));
+            },
+            [&](int nibble) {
+                payload_writer.write_bits(codes[nibble], lengths[nibble]);
+            });
+    };
+
+    const auto include_all_bands = [](size_t) { return true; };
+    write_mask(mode_ms.size(), include_all_bands,
+               [&](size_t i) { return mode_ms[i] != 0; },
+               [&](size_t i) { return pred_state.prev_mode_ms[i] != 0; },
+               MODE_MS_HUFF_CODE, MODE_MS_HUFF_LEN, can_state_pred);
+    write_mask(active0.size(), include_all_bands,
+               [&](size_t i) { return active0[i]; },
+               [&](size_t i) { return pred_state.prev_active0[i] != 0; },
+               ACTIVE_HUFF_CODE, ACTIVE_HUFF_LEN, can_state_pred);
 
     if (stereo) {
         int is_start = use_is ? get_is_start_band(target_kbps, total_bands) : band_count;
-        std::vector<int> idx_list;
-        for (int i = 0; i < band_count; ++i) {
-            bool is_is_band = use_is && (i >= is_start) && mode_ms[i];
-            if (!is_is_band) idx_list.push_back(i);
-        }
-        int non_is_count = (int)idx_list.size();
-        for (int j = 0; j < non_is_count; j += 4) {
-            int nibble = 0;
-            for (int s = 0; s < 4; ++s) {
-                int idx = j + s; nibble <<= 1;
-                if (idx < non_is_count && active1[idx_list[idx]]) nibble |= 1;
-            }
-            payload_writer.write_bits(ACTIVE_HUFF_CODE[nibble], ACTIVE_HUFF_LEN[nibble]);
-        }
+        const auto is_excluded = [&](int band) {
+            return use_is && band >= is_start && mode_ms[band];
+        };
+        write_mask(static_cast<size_t>(band_count),
+                   [&](size_t band) { return !is_excluded(static_cast<int>(band)); },
+                   [&](size_t band) { return active1[band]; },
+                   [&](size_t band) {
+                       return band < pred_state.prev_active1.size() &&
+                              pred_state.prev_active1[band] != 0;
+                   },
+                   ACTIVE_HUFF_CODE, ACTIVE_HUFF_LEN, can_state_pred);
     }
 
     rice_encode(payload_writer, scale_vals0, k_scale0);
@@ -757,14 +800,96 @@ std::vector<uint8_t> compress_block_adaptive_joint(
         }
     }
 
-    int kidx_slot0 = select_best_kidx_slot(k_sub_vals0);
-    int kidx_slot1 = stereo ? select_best_kidx_slot(k_sub_vals1) : 0;
+    const auto write_k_sub_modes = [&](const std::vector<uint32_t>& values,
+                                       const auto& is_active,
+                                       const std::vector<uint8_t>& previous_active,
+                                       const std::vector<uint8_t>& previous_modes) {
+        const int raw_slot = select_best_kidx_slot(values);
+        int raw_cost = 0;
+        for (uint32_t value : values)
+            raw_cost += KIDX_COEFF_HUFF_LEN[raw_slot][value];
 
-    payload_writer.write_bits((uint32_t)kidx_slot0, 3);
-    if (stereo) payload_writer.write_bits((uint32_t)kidx_slot1, 3);
+        std::array<int, 8> changed_slot_costs{};
+        std::array<bool, 8> changed_slot_valid;
+        changed_slot_valid.fill(true);
+        size_t changed_count = 0;
+        size_t value_idx = 0;
+        for (int band = 0; band < band_count; ++band) {
+            if (!is_active(band))
+                continue;
+            const uint32_t value = values[value_idx++];
+            const bool can_reuse = can_state_pred &&
+                band < (int)previous_active.size() && previous_active[band] &&
+                band < (int)previous_modes.size() && previous_modes[band] == value;
+            if (can_reuse)
+                continue;
+            ++changed_count;
+            for (int slot = 0; slot < 8; ++slot) {
+                if (value > 16u || KIDX_COEFF_HUFF_LEN[slot][value] == 0) {
+                    changed_slot_valid[slot] = false;
+                } else {
+                    changed_slot_costs[slot] += KIDX_COEFF_HUFF_LEN[slot][value];
+                }
+            }
+        }
 
-    for (uint32_t v : k_sub_vals0) write_kidx_huff(payload_writer, v, kidx_slot0);
-    if (stereo) for (uint32_t v : k_sub_vals1) write_kidx_huff(payload_writer, v, kidx_slot1);
+        int changed_slot = 0;
+        if (changed_count > 0) {
+            int best_changed_cost = INT_MAX;
+            for (int slot = 0; slot < 8; ++slot) {
+                if (changed_slot_valid[slot] &&
+                    changed_slot_costs[slot] < best_changed_cost) {
+                    changed_slot = slot;
+                    best_changed_cost = changed_slot_costs[slot];
+                }
+            }
+        }
+        const int changed_cost = changed_slot_costs[changed_slot];
+
+        const size_t predicted_cost =
+            1 + values.size() + (changed_count == 0 ? 0 : 3 + changed_cost);
+        const size_t unpredicted_cost = 1 + 3 + raw_cost;
+        const bool use_prediction = can_state_pred && predicted_cost < unpredicted_cost;
+        if (can_state_pred)
+            payload_writer.write_bits(use_prediction ? 1u : 0u, 1);
+        if (!use_prediction) {
+            payload_writer.write_bits((uint32_t)raw_slot, 3);
+            for (uint32_t value : values)
+                write_kidx_huff(payload_writer, value, raw_slot);
+            return;
+        }
+
+        value_idx = 0;
+        for (int band = 0; band < band_count; ++band) {
+            if (!is_active(band))
+                continue;
+            const uint32_t value = values[value_idx++];
+            const bool can_reuse = band < (int)previous_active.size() &&
+                previous_active[band] && band < (int)previous_modes.size() &&
+                previous_modes[band] == value;
+            payload_writer.write_bits(can_reuse ? 0u : 1u, 1);
+        }
+        if (changed_count > 0) {
+            payload_writer.write_bits((uint32_t)changed_slot, 3);
+            value_idx = 0;
+            for (int band = 0; band < band_count; ++band) {
+                if (!is_active(band))
+                    continue;
+                const uint32_t value = values[value_idx++];
+                const bool can_reuse = band < (int)previous_active.size() &&
+                    previous_active[band] && band < (int)previous_modes.size() &&
+                    previous_modes[band] == value;
+                if (!can_reuse)
+                    write_kidx_huff(payload_writer, value, changed_slot);
+            }
+        }
+    };
+
+    write_k_sub_modes(k_sub_vals0, [&](int i) { return active0[i]; },
+                      pred_state.prev_active0, pred_state.prev_k_sub0);
+    if (stereo)
+        write_k_sub_modes(k_sub_vals1, [&](int i) { return active1[i]; },
+                          pred_state.prev_active1, pred_state.prev_k_sub1);
 
     for (int i = 0; i < band_count; ++i) {
         if (!active0[i]) continue;
@@ -824,11 +949,80 @@ std::vector<uint8_t> compress_block_adaptive_joint(
                     coeff_syms.push_back(std::clamp(sym, IS_TBL_LO, IS_TBL_HI));
                 }
             }
-            int best_table = select_best_is_table(coeff_syms);
-            payload_writer.write_bits((uint32_t)best_table, 3);
-            for (int sym : coeff_syms) {
-                int idx = sym - IS_TBL_LO;
-                payload_writer.write_bits(IS_TBL_CODE[best_table][idx], IS_TBL_LEN[best_table][idx]);
+            int table_cost = 0;
+            int best_table = select_best_is_table(coeff_syms, table_cost);
+            const auto for_each_is_residual = [&](int mode, const auto& visit) {
+                int previous = 0;
+                std::array<int, 4> previous_lane{};
+                size_t coeff_idx = 0;
+                for (int band : is_indices) {
+                    const bool segmented = is_use_segmented[band];
+                    const int segment_count = segmented ? 4 : 1;
+                    int previous_segment = 0;
+                    for (int segment = 0; segment < segment_count; ++segment) {
+                        const int sym = coeff_syms[coeff_idx++];
+                        int predictor = 0;
+                        if (mode == 1) {
+                            predictor = previous;
+                        } else if (mode == 2) {
+                            predictor = segmented && segment > 0
+                                ? previous_segment : previous_lane[segment];
+                        } else if (mode == 3) {
+                            const bool have_previous_is =
+                                can_state_pred && band < (int)pred_state.prev_is_valid.size() &&
+                                pred_state.prev_is_valid[band];
+                            if (have_previous_is)
+                                predictor = pred_state.prev_is_coeff[band][segment];
+                        }
+                        visit(zigzag_encode(sym - predictor));
+                        previous = sym;
+                        previous_lane[segment] = sym;
+                        previous_segment = sym;
+                    }
+                }
+            };
+
+            int best_mode = 0;
+            size_t best_cost = static_cast<size_t>(table_cost);
+            int best_rice_k = 0;
+            for (int mode = 0; mode < 4; ++mode) {
+                std::array<size_t, 8> costs{};
+                for_each_is_residual(mode, [&](uint32_t value) {
+                    for (int k = 0; k <= 7; ++k)
+                        costs[k] += (value >> k) + 1 + k;
+                });
+                int k = 0;
+                for (int candidate = 1; candidate <= 7; ++candidate)
+                    if (costs[candidate] < costs[k])
+                        k = candidate;
+                const size_t cost = costs[k];
+                if (cost + 2 < best_cost) {
+                    best_mode = mode + 1;
+                    best_cost = cost + 2;
+                    best_rice_k = k;
+                }
+            }
+
+            payload_writer.write_bits(best_mode != 0 ? 1u : 0u, 1);
+            if (best_mode != 0) {
+                payload_writer.write_bits((uint32_t)(best_mode - 1), 2);
+                payload_writer.write_bits((uint32_t)best_rice_k, 3);
+                const uint32_t remainder_mask =
+                    best_rice_k == 0 ? 0u : (1u << best_rice_k) - 1u;
+                for_each_is_residual(best_mode - 1, [&](uint32_t value) {
+                    const uint32_t quotient = value >> best_rice_k;
+                    if (quotient > 0)
+                        payload_writer.write_bits(~0ULL, quotient);
+                    payload_writer.write_bits(0, 1);
+                    if (best_rice_k > 0)
+                        payload_writer.write_bits(value & remainder_mask, best_rice_k);
+                });
+            } else {
+                payload_writer.write_bits((uint32_t)best_table, 3);
+                for (int sym : coeff_syms) {
+                    int idx = sym - IS_TBL_LO;
+                    payload_writer.write_bits(IS_TBL_CODE[best_table][idx], IS_TBL_LEN[best_table][idx]);
+                }
             }
         }
     }
@@ -854,6 +1048,10 @@ std::vector<uint8_t> compress_block_adaptive_joint(
 
     pred_state.prev_scale0 = full_scale0;
     pred_state.prev_scale1 = full_scale1;
+    pred_state.prev_scale_k0 = static_cast<uint8_t>(k_scale0);
+    pred_state.prev_scale_k1 = static_cast<uint8_t>(k_scale1);
+    pred_state.prev_scale_k_valid = true;
+    pred_state.prev_mode_ms = mode_ms;
     pred_state.prev_active0.assign(band_count, 0);
     for (int i = 0; i < band_count; ++i) if (active0[i]) pred_state.prev_active0[i] = 1;
     if (stereo) {
@@ -862,14 +1060,37 @@ std::vector<uint8_t> compress_block_adaptive_joint(
     } else {
         pred_state.prev_active1.assign(band_count, 0);
     }
+    pred_state.prev_k_sub0.assign(band_count, 0);
+    pred_state.prev_k_sub1.assign(band_count, 0);
+    for (int i = 0; i < band_count; ++i) {
+        if (active0[i]) pred_state.prev_k_sub0[i] = mode0[i];
+        if (stereo && active1[i]) pred_state.prev_k_sub1[i] = mode1[i];
+    }
 
     pred_state.prev_sbr_valid.assign(band_count, 0);
     pred_state.prev_sbr_noise.assign(band_count, 0);
+    pred_state.prev_is_valid.assign(band_count, 0);
     for (int i = 0; i < sbr_end && i < band_count; ++i) {
         if (!active0[i]) {
             pred_state.prev_sbr_valid[i] = 1;
             pred_state.prev_sbr_rms[i]   = sbr.rms_idx[i];
             pred_state.prev_sbr_noise[i] = sbr.noise_flag[i] ? 1 : 0;
+            pred_state.prev_sbr_shape[i] = sbr.shape_mask[i];
+        }
+    }
+    for (int i = 0; i < band_count; ++i) {
+        if (!is_band[i])
+            continue;
+        pred_state.prev_is_valid[i] = 1;
+        const int bits = get_r_bits(i);
+        if (is_use_segmented[i]) {
+            for (int segment = 0; segment < 4; ++segment) {
+                pred_state.prev_is_coeff[i][segment] = static_cast<int8_t>(
+                    quantize_r_centered(is_r_vals[i][segment], bits));
+            }
+        } else {
+            const int sym = static_cast<int8_t>(quantize_r_centered(is_r_vals[i][0], bits));
+            pred_state.prev_is_coeff[i].fill(static_cast<int8_t>(sym));
         }
     }
     pred_state.ready = true;
@@ -905,7 +1126,7 @@ void save_compressed_buffered(
     uint8_t ch = (uint8_t)num_channels; f.write((char*)&ch, 1);
     uint32_t block_count = (uint32_t)blocks.size(); f.write((char*)&block_count, 4);
     f.write((char*)&target_kbps, 4);
-    uint8_t block_format_version = 36;
+    uint8_t block_format_version = 39;
     f.write((char*)&block_format_version, 1);
     f.write((char*)&total_frames, 4);
 
@@ -927,7 +1148,7 @@ void save_compressed_buffered(
 
     int long_blocks = (int)std::count(block_modes.begin(), block_modes.end(), true);
     int short_blocks = (int)block_count - long_blocks;
-    std::cout << "Saved container v30/block v35 to " << path << " ("
+    std::cout << "Saved container v30/block v39 to " << path << " ("
               << blocks.size() << " blocks, "
               << long_blocks << " long, "
               << short_blocks << " short, speed_mode=" << (speed_mode ? "yes" : "no")

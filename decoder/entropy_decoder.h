@@ -60,6 +60,15 @@ public:
         return result;
     }
 
+    inline uint32_t peek_bits(int num_bits) {
+        if (num_bits <= 0) return 0;
+        ensure_bits(num_bits);
+        if (bit_count_ < num_bits) return 0;
+        const int shift = bit_count_ - num_bits;
+        const uint64_t mask = (1ULL << num_bits) - 1;
+        return static_cast<uint32_t>((buffer_ >> shift) & mask);
+    }
+
     inline uint32_t read_unary() {
         uint32_t q = 0;
         while (true) {

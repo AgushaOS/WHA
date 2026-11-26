@@ -77,6 +77,7 @@ inline QuantResult quantize_levels(
     deadzone_scale = std::clamp(deadzone_scale, 0.0f, 1.0f);
 
     const int block_size = std::max(4, 256 / band_count);
+    static thread_local std::vector<float> block_data;
 
     for (int l = 0; l < band_count; ++l) {
         const int bbits = bits_per_level[l];
@@ -96,53 +97,31 @@ inline QuantResult quantize_levels(
 
         float max_abs = 0.0f;
 
-        const int num_blocks = static_cast<int>(len / block_size);
+        const int num_blocks =
+            static_cast<int>((len + block_size - 1) / block_size);
 
-        std::vector<float> block_sum_sq(num_blocks, 0.0f);
+        block_data.assign(num_blocks, 0.0f);
 
-        if (bbits <= 2) {
-            std::vector<float> abs_vals;
-            abs_vals.reserve(total_samples);
-
-            for (int ch = 0; ch < num_channels; ++ch) {
-                const auto& arr = coeffs_channels[ch][l];
-
-                for (size_t i = 0; i < len; ++i) {
+        for (int ch = 0; ch < num_channels; ++ch) {
+            const auto& arr = coeffs_channels[ch][l];
+            for (int b = 0; b < num_blocks; ++b) {
+                const size_t start = static_cast<size_t>(b) * block_size;
+                const size_t end = std::min(start + block_size, len);
+                float sum_sq = block_data[b];
+                for (size_t i = start; i < end; ++i) {
                     const float v = arr[i];
                     const float av = std::abs(v);
-
-                    abs_vals.push_back(av);
-
                     if (av > max_abs)
                         max_abs = av;
-
-                    const int b = static_cast<int>(i / block_size);
-
-                    if (b < num_blocks)
-                        block_sum_sq[b] += v * v;
+                    sum_sq += v * v;
                 }
+                block_data[b] = sum_sq;
             }
 
+        }
+
+        if (bbits <= 2)
             max_abs *= 0.5f;
-        }
-        else {
-            for (int ch = 0; ch < num_channels; ++ch) {
-                const auto& arr = coeffs_channels[ch][l];
-
-                for (size_t i = 0; i < len; ++i) {
-                    const float v = arr[i];
-                    const float av = std::abs(v);
-
-                    if (av > max_abs)
-                        max_abs = av;
-
-                    const int b = static_cast<int>(i / block_size);
-
-                    if (b < num_blocks)
-                        block_sum_sq[b] += v * v;
-                }
-            }
-        }
 
         if (max_abs < 1e-12f)
             max_abs = 1.0f;
@@ -155,16 +134,17 @@ inline QuantResult quantize_levels(
         const float step =
             max_abs / static_cast<float>(max_int);
 
-        std::vector<float> block_deadzones(num_blocks);
-
         float current_prev_rms =
             tm_state ? tm_state->prev_effective_rms[l] : 0.0f;
 
         for (int b = 0; b < num_blocks; ++b) {
+            const size_t block_start = static_cast<size_t>(b) * block_size;
+            const size_t block_length =
+                std::min(static_cast<size_t>(block_size), len - block_start);
             const float block_rms =
                 std::sqrt(
-                    block_sum_sq[b] /
-                    static_cast<float>(block_size * num_channels)
+                    block_data[b] /
+                    static_cast<float>(block_length * num_channels)
                     + 1e-12f
                 );
 
@@ -178,7 +158,7 @@ inline QuantResult quantize_levels(
                 current_prev_rms = effective_rms;
             }
 
-            block_deadzones[b] =
+            block_data[b] =
                 compute_powerlaw_deadzone(
                     step,
                     effective_rms,
@@ -194,47 +174,49 @@ inline QuantResult quantize_levels(
 
         size_t out_pos = 0;
 
-        for (int ch = 0; ch < num_channels; ++ch) {
-            const auto& arr = coeffs_channels[ch][l];
-
-            int b = 0;
-            size_t next_boundary = block_size;
-
-            for (size_t i = 0; i < len; ++i) {
-                if (i >= next_boundary) {
-                    ++b;
-                    next_boundary += block_size;
+        if (bbits == 1) {
+            for (int ch = 0; ch < num_channels; ++ch) {
+                const auto& arr = coeffs_channels[ch][l];
+                for (size_t i = 0; i < len; ++i) {
+                    const float v_clip = std::max(0.0f, arr[i]);
+                    int32_t q = static_cast<int32_t>(
+                        std::round(v_clip / step));
+                    quantized[out_pos++] = std::clamp(q, 0, 1);
                 }
-
-                const float v = arr[i];
-                const float av = std::abs(v);
-
-                int32_t q;
-
-                if (bbits == 1) {
-                    const float v_clip =
-                        (sgn == 1)
-                            ? std::max(0.0f, v)
-                            : std::max(0.0f, -v);
-
-                    q = static_cast<int32_t>(
-                        std::round(v_clip / step)
-                    );
-
-                    q = std::clamp(q, 0, 1);
-                }
-                else {
-                    if (av < block_deadzones[b]) {
-                        q = 0;
-                    }
-                    else {
-                        q = static_cast<int32_t>(
-                            std::round(v / step)
-                        );
+            }
+        } else if (len % block_size == 0) {
+            for (int ch = 0; ch < num_channels; ++ch) {
+                const auto& arr = coeffs_channels[ch][l];
+                for (int b = 0; b < num_blocks; ++b) {
+                    const float deadzone = block_data[b];
+                    const size_t start = static_cast<size_t>(b) * block_size;
+                    const size_t end = start + block_size;
+                    for (size_t i = start; i < end; ++i) {
+                        const float v = arr[i];
+                        const int32_t q = std::abs(v) < deadzone
+                            ? 0
+                            : static_cast<int32_t>(std::round(v / step));
+                        quantized[out_pos++] = q;
                     }
                 }
+            }
+        } else {
+            for (int ch = 0; ch < num_channels; ++ch) {
+                const auto& arr = coeffs_channels[ch][l];
+                int b = 0;
+                size_t next_boundary = block_size;
+                for (size_t i = 0; i < len; ++i) {
+                    if (i >= next_boundary) {
+                        ++b;
+                        next_boundary += block_size;
+                    }
 
-                quantized[out_pos++] = q;
+                    const float v = arr[i];
+                    const int32_t q = std::abs(v) < block_data[b]
+                        ? 0
+                        : static_cast<int32_t>(std::round(v / step));
+                    quantized[out_pos++] = q;
+                }
             }
         }
 
@@ -250,28 +232,7 @@ inline QuantResult quantize_levels(
         quantized_per_level[l] = std::move(quantized);
     }
 
-    for (auto x : quantized_per_level) {
-        bool f = 0, f2 = 1;
-        for (auto y : x) {
-            f |= (y != 0);
-        }
-
-        // for (auto y : x) {
-        //     if (std::abs(y) > 15) {
-        //         f2 = 0;
-        //     }
-        // }
-        
-        // if (f) {
-        //     for (auto y : x) {
-        //         std::cout << y << ' ';
-        //     }
-        // }
-        // std::cout << '\n';
-    }
-
     return { std::move(scales), std::move(quantized_per_level) };
 }
 
 #endif // QUANTIZE_H
-

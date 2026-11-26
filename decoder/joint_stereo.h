@@ -73,7 +73,7 @@ inline float compute_r_segment(const std::vector<float>& left, const std::vector
                                int start, int end)
 {
     double eL = 0.0, eR = 0.0;
-    for (int i = start; i < end; ++i) {
+    for (size_t i = start; i < end; ++i) {
         eL += left[i] * left[i];
         eR += right[i] * right[i];
     }
@@ -101,108 +101,66 @@ inline void compute_is_parameters_ex(const std::vector<float>& left,
                                      int total_bands,
                                      int seg_threshold)
 {
-    const size_t n = left.size();
-    double eL_total = 0.0, eR_total = 0.0, dot_total = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        eL_total  += left[i]  * left[i];
-        eR_total  += right[i] * right[i];
-        dot_total += left[i]  * right[i];
-    }
-
-    for (int s = 0; s < 4; ++s) inv_flags[s] = false;
-
+    const size_t n = std::min(left.size(), right.size());
     const double eps = 1e-12;
-    double total = eL_total + eR_total;
-    if (total < eps || eL_total < eps || eR_total < eps) {
-        for (int s = 0; s < 4; ++s) r_out[s] = 0.5f;
-        Y.assign(n, 0.0f);
-        use_segmented = false;
-        return;
-    }
-
     (void)total_bands;
     use_segmented = (band_idx < seg_threshold);
+    Y.assign(n, 0.0f);
+    r_out.fill(0.5f);
+    inv_flags.fill(false);
+
+    const auto process_segment = [&](size_t start, size_t end, int segment) {
+        double eL = 0.0, eR = 0.0, cross = 0.0;
+        for (size_t i = start; i < end; ++i) {
+            const double l = left[i];
+            const double r = right[i];
+            eL += l * l;
+            eR += r * r;
+            cross += l * r;
+        }
+
+        const double total = eL + eR;
+        if (total < eps)
+            return;
+
+        r_out[segment] = static_cast<float>(eR / total);
+        if (eL >= eps && eR >= eps) {
+            const double correlation = cross / std::sqrt(eL * eR);
+            inv_flags[segment] = (correlation < -0.2);
+        }
+
+        const double left_gain = std::sqrt(eL / total);
+        const double right_gain = std::sqrt(eR / total) *
+                                  (inv_flags[segment] ? -1.0 : 1.0);
+        double mixed_energy = 0.0;
+        for (size_t i = start; i < end; ++i) {
+            const double mixed = left_gain * left[i] + right_gain * right[i];
+            Y[i] = static_cast<float>(mixed);
+            mixed_energy += mixed * mixed;
+        }
+
+        if (mixed_energy < eps) {
+            const bool use_left = eL >= eR;
+            const double source_energy = use_left ? eL : eR;
+            const double gain = std::sqrt(total / source_energy);
+            for (size_t i = start; i < end; ++i)
+                Y[i] = static_cast<float>((use_left ? left[i] : right[i]) * gain);
+        } else {
+            const double gain = std::sqrt(total / mixed_energy);
+            for (size_t i = start; i < end; ++i)
+                Y[i] = static_cast<float>(Y[i] * gain);
+        }
+    };
 
     if (use_segmented) {
-        const int seg_size = (int)(n / 4);
-        Y.resize(n);
-        for (int s = 0; s < 4; ++s) {
-            int start = s * seg_size;
-            int end = (s == 3) ? (int)n : start + seg_size;
-            int len = end - start;
-
-            double seg_eL = 0.0, seg_eR = 0.0, seg_dot = 0.0;
-            for (int i = start; i < end; ++i) {
-                seg_eL += left[i] * left[i];
-                seg_eR += right[i] * right[i];
-                seg_dot += left[i] * right[i];
-            }
-
-            double seg_total = seg_eL + seg_eR;
-            if (seg_total < eps) {
-                r_out[s] = 0.5f;
-                for (int i = start; i < end; ++i) Y[i] = 0.0f;
-                continue;
-            }
-
-            double seg_corr = seg_dot / (std::sqrt(seg_eL * seg_eR) + eps);
-            inv_flags[s] = (seg_corr < -0.2);
-
-            r_out[s] = static_cast<float>(seg_eR / seg_total);
-            double sqrt_eL = std::sqrt(seg_eL);
-            double sqrt_eR = std::sqrt(seg_eR);
-            double inv_sqrt_total = 1.0 / std::sqrt(seg_total);
-
-            double eX = 0.0;
-            std::vector<float> X_seg(len);
-            for (int i = 0; i < len; ++i) {
-                int idx = start + i;
-                double Rterm = inv_flags[s] ? -sqrt_eR * right[idx] : sqrt_eR * right[idx];
-                double x = (sqrt_eL * left[idx] + Rterm) * inv_sqrt_total;
-                X_seg[i] = static_cast<float>(x);
-                eX += x * x;
-            }
-
-            if (eX < eps) {
-                for (int i = start; i < end; ++i) Y[i] = 0.0f;
-            } else {
-                double inv_sqrt_eX = 1.0 / std::sqrt(eX);
-                double target_energy = std::sqrt(seg_total);
-                for (int i = 0; i < len; ++i) {
-                    Y[start + i] = static_cast<float>(X_seg[i] * inv_sqrt_eX * target_energy);
-                }
-            }
-        }
+        for (int s = 0; s < 4; ++s)
+            process_segment((static_cast<size_t>(s) * n) / 4,
+                            (static_cast<size_t>(s + 1) * n) / 4, s);
     } else {
-        use_segmented = false;
-        double corr = dot_total / (std::sqrt(eL_total * eR_total) + eps);
-        inv_flags[0] = (corr < -0.2);
-
-        float r = static_cast<float>(eR_total / total);
-        for (int s = 0; s < 4; ++s) r_out[s] = r;
-
-        double sqrtE = std::sqrt(total);
-        double sqrt_eL = std::sqrt(eL_total);
-        double sqrt_eR = std::sqrt(eR_total);
-        double inv_sqrt_total = 1.0 / std::sqrt(total);
-
-        std::vector<float> X(n);
-        double eX = 0.0;
-        for (size_t i = 0; i < n; ++i) {
-            double Rterm = inv_flags[0] ? -sqrt_eR * right[i] : sqrt_eR * right[i];
-            double x = (sqrt_eL * left[i] + Rterm) * inv_sqrt_total;
-            X[i] = static_cast<float>(x);
-            eX += x * x;
-        }
-
-        if (eX < eps) {
-            Y.assign(n, 0.0f);
-        } else {
-            double inv_sqrt_eX = 1.0 / std::sqrt(eX);
-            Y.resize(n);
-            for (size_t i = 0; i < n; ++i) {
-                Y[i] = static_cast<float>(X[i] * inv_sqrt_eX * sqrtE);
-            }
+        process_segment(0, n, 0);
+        for (int s = 1; s < 4; ++s) {
+            r_out[s] = r_out[0];
+            inv_flags[s] = inv_flags[0];
         }
     }
 }
@@ -218,23 +176,22 @@ inline void apply_is(const std::vector<float>& Y,
     left.resize(n);
     right.resize(n);
 
-    if (use_segmented && n >= 16) {
-        int seg_size = (int)(n / 4);
+    if (use_segmented) {
         for (int s = 0; s < 4; ++s) {
-            float r = r_vals[s];
+            float r = std::clamp(r_vals[s], 0.0f, 1.0f);
             float gl = std::sqrt(1.0f - r);
             float gr = std::sqrt(r);
-            int start = s * seg_size;
-            int end = (s == 3) ? (int)n : start + seg_size;
+            size_t start = (static_cast<size_t>(s) * n) / 4;
+            size_t end = (static_cast<size_t>(s + 1) * n) / 4;
 
             bool local_inv = inv_flags[s];
-            for (int i = start; i < end; ++i) {
+            for (size_t i = start; i < end; ++i) {
                 left[i]  = Y[i] * gl;
                 right[i] = Y[i] * (local_inv ? -gr : gr);
             }
         }
     } else {
-        float r = r_vals[0];
+        float r = std::clamp(r_vals[0], 0.0f, 1.0f);
         float gl = std::sqrt(1.0f - r);
         float gr = std::sqrt(r);
         bool local_inv = inv_flags[0];
@@ -254,24 +211,23 @@ inline void apply_is_inplace(std::vector<float>& Y_and_left,
     size_t n = Y_and_left.size();
     right_out.resize(n);
 
-    if (use_segmented && n >= 16) {
-        int seg_size = (int)(n / 4);
+    if (use_segmented) {
         for (int s = 0; s < 4; ++s) {
-            float r = r_vals[s];
+            float r = std::clamp(r_vals[s], 0.0f, 1.0f);
             float gl = std::sqrt(1.0f - r);
             float gr = std::sqrt(r);
-            int start = s * seg_size;
-            int end = (s == 3) ? (int)n : start + seg_size;
+            size_t start = (static_cast<size_t>(s) * n) / 4;
+            size_t end = (static_cast<size_t>(s + 1) * n) / 4;
             bool local_inv = inv_flags[s];
             float gr_signed = local_inv ? -gr : gr;
-            for (int i = start; i < end; ++i) {
+            for (size_t i = start; i < end; ++i) {
                 float y = Y_and_left[i];
                 Y_and_left[i] = y * gl;
                 right_out[i]  = y * gr_signed;
             }
         }
     } else {
-        float r = r_vals[0];
+        float r = std::clamp(r_vals[0], 0.0f, 1.0f);
         float gl = std::sqrt(1.0f - r);
         float gr = std::sqrt(r);
         bool local_inv = inv_flags[0];

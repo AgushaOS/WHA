@@ -58,7 +58,7 @@ inline uint8_t sbr_read_huffman(BitReaderMSB& reader)
 {
     uint32_t code = 0;
 
-    for (int len = 1; len <= 8; ++len) {
+    for (int len = 1; len <= 9; ++len) {
         code = (code << 1) | reader.read_bits(1);
 
         switch (len) {
@@ -94,8 +94,12 @@ inline uint8_t sbr_read_huffman(BitReaderMSB& reader)
                 break;
 
             case 8:
-                if (code == 0b01110010) return 5;
                 if (code == 0b01110011) return 9;
+                break;
+
+            case 9:
+                if (code == 0b011100100) return 5;
+                if (code == 0b011100101) return 15;
                 break;
         }
     }
@@ -129,17 +133,30 @@ inline void sbr_decode_v23(SBRDecodeResult& result,
         result.noise_flag[idx] = bit;
     }
 
-    for (int idx : result.indices)
-        result.shape_mask[idx] = sbr_read_huffman(reader);
+    const bool use_shape_prediction = reader.read_bits(1) != 0;
+    const int shape_mode = use_shape_prediction
+        ? (reader.read_bits(1) != 0 ? 2 : 1)
+        : 0;
+    uint8_t previous_mask = 0;
+    for (int idx : result.indices) {
+        const uint8_t coded_mask = sbr_read_huffman(reader);
+        uint8_t mask = coded_mask;
+        if (shape_mode == 1)
+            mask ^= previous_mask;
+        else if (shape_mode == 2 &&
+                 idx < (int)pred_state.prev_sbr_shape.size() &&
+                 idx < (int)pred_state.prev_sbr_valid.size() &&
+                 pred_state.prev_sbr_valid[idx])
+            mask ^= pred_state.prev_sbr_shape[idx];
+        result.shape_mask[idx] = mask;
+        previous_mask = mask;
+    }
 
     int k_sbr = (int)reader.read_bits(3);
-    auto sbr_vals = rice_decode(reader, (int)result.indices.size(), k_sbr);
-    if ((int)sbr_vals.size() != (int)result.indices.size())
-        throw std::runtime_error("SBR RMS decode size mismatch");
-
-    for (size_t j = 0; j < result.indices.size(); ++j) {
-        int idx = result.indices[j];
-        uint32_t val = sbr_vals[j];
+    for (int idx : result.indices) {
+        const uint32_t quotient = reader.read_unary();
+        const uint32_t remainder = k_sbr > 0 ? reader.read_bits(k_sbr) : 0;
+        const uint32_t val = (quotient << k_sbr) | remainder;
         int sb = get_scale_bits(idx);
         int max_idx = (1 << sb) - 1;
         uint32_t rms_idx;

@@ -78,21 +78,21 @@ inline SBREncodeResult sbr_analyze(
         const int seg_size = N / 4;
 
         float seg_max[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        double sum_sq = 0.0;
+        float max_abs = 0.0f;
 
         for (int s = 0; s < 4; ++s) {
             const int start = s * seg_size;
             const int end = (s == 3) ? N : (s + 1) * seg_size;
 
-            float max_abs = 0.0f;
-
             for (int j = start; j < end; ++j) {
-                const float av = fabsf(orig[j]);
+                const float value = orig[j];
+                const float av = fabsf(value);
 
-                if (av > max_abs)
-                    max_abs = av;
+                sum_sq += static_cast<double>(value) * value;
+                if (av > max_abs) max_abs = av;
+                if (av > seg_max[s]) seg_max[s] = av;
             }
-
-            seg_max[s] = max_abs;
         }
 
         const float total_max =
@@ -125,18 +125,6 @@ inline SBREncodeResult sbr_analyze(
 
         result.shape_mask[i] = best_mask;
 
-        double sum_sq = 0.0;
-        float max_abs = 0.0f;
-
-        for (float v : orig) {
-            sum_sq += static_cast<double>(v) * v;
-
-            const float av = fabsf(v);
-
-            if (av > max_abs)
-                max_abs = av;
-        }
-
         const float rms =
             sqrtf(static_cast<float>(sum_sq / N) + eps);
 
@@ -162,7 +150,7 @@ inline void sbr_write_huffman(BitWriterMSB& writer, uint8_t mask)
         case 2:  writer.write_bits(0b00000,    5); break;
         case 3:  writer.write_bits(0b01001,    5); break;
         case 4:  writer.write_bits(0b00001,    5); break;
-        case 5:  writer.write_bits(0b01110010, 8); break;
+        case 5:  writer.write_bits(0b011100100, 9); break;
         case 6:  writer.write_bits(0b011101,   6); break;
         case 7:  writer.write_bits(0b001,      3); break;
         case 8:  writer.write_bits(0b0001,     4); break;
@@ -172,8 +160,17 @@ inline void sbr_write_huffman(BitWriterMSB& writer, uint8_t mask)
         case 12: writer.write_bits(0b01111,    5); break;
         case 13: writer.write_bits(0b01000,    5); break;
         case 14: writer.write_bits(0b0110,     4); break;
+        case 15: writer.write_bits(0b011100101, 9); break;
         default: writer.write_bits(0b1,        1); break;
     }
+}
+
+inline int sbr_shape_huffman_bits(uint8_t mask)
+{
+    static constexpr uint8_t lengths[16] = {
+        1, 5, 5, 5, 5, 9, 6, 3, 4, 8, 7, 5, 5, 5, 4, 9
+    };
+    return lengths[mask & 0x0F];
 }
 
 inline void sbr_write_to_stream(
@@ -200,33 +197,82 @@ inline void sbr_write_to_stream(
         writer.write_bits(write_bit ? 1 : 0, 1);
     }
 
-    for (int idx : sbr_indices)
-        sbr_write_huffman(writer, sbr.shape_mask[idx]);
-
-    std::vector<uint32_t> sbr_vals;
-    sbr_vals.reserve(sbr_indices.size());
-
+    std::array<size_t, 3> shape_costs{};
+    uint8_t previous_mask = 0;
     for (int idx : sbr_indices) {
-        const uint32_t cur = sbr.rms_idx[idx];
-        uint32_t val = cur;
-
-        if (can_state_pred &&
+        const uint8_t mask = sbr.shape_mask[idx] & 0x0F;
+        shape_costs[0] += sbr_shape_huffman_bits(mask);
+        shape_costs[1] += sbr_shape_huffman_bits(mask ^ previous_mask);
+        const uint8_t previous_block_mask =
+            idx < (int)pred_state.prev_sbr_shape.size() &&
             idx < (int)pred_state.prev_sbr_valid.size() &&
-            pred_state.prev_sbr_valid[idx])
-        {
-            const int32_t d =
-                (int32_t)cur - (int32_t)pred_state.prev_sbr_rms[idx];
-
-            val = zigzag_encode(d);
-        }
-
-        sbr_vals.push_back(val);
+            pred_state.prev_sbr_valid[idx]
+                ? pred_state.prev_sbr_shape[idx] : 0;
+        shape_costs[2] += sbr_shape_huffman_bits(mask ^ previous_block_mask);
+        previous_mask = mask;
     }
 
-    const int k_sbr = compute_optimal_rice_k(sbr_vals, 7);
+    int shape_mode = 0;
+    size_t best_shape_cost = shape_costs[0];
+    if (shape_costs[1] + 1 < best_shape_cost) {
+        shape_mode = 1;
+        best_shape_cost = shape_costs[1] + 1;
+    }
+    if (can_state_pred && shape_costs[2] + 1 < best_shape_cost)
+        shape_mode = 2;
+    writer.write_bits(shape_mode != 0 ? 1u : 0u, 1);
+    if (shape_mode != 0)
+        writer.write_bits(shape_mode == 2 ? 1u : 0u, 1);
+    previous_mask = 0;
+    for (int idx : sbr_indices) {
+        const uint8_t mask = sbr.shape_mask[idx] & 0x0F;
+        uint8_t coded_mask = mask;
+        if (shape_mode == 1)
+            coded_mask ^= previous_mask;
+        else if (shape_mode == 2 &&
+                 idx < (int)pred_state.prev_sbr_shape.size() &&
+                 idx < (int)pred_state.prev_sbr_valid.size() &&
+                 pred_state.prev_sbr_valid[idx])
+            coded_mask ^= pred_state.prev_sbr_shape[idx];
+        sbr_write_huffman(writer, coded_mask);
+        previous_mask = mask;
+    }
+
+    const auto get_sbr_value = [&](int idx) {
+        const uint32_t cur = sbr.rms_idx[idx];
+        if (can_state_pred &&
+            idx < (int)pred_state.prev_sbr_valid.size() &&
+            pred_state.prev_sbr_valid[idx]) {
+            const int32_t delta =
+                (int32_t)cur - (int32_t)pred_state.prev_sbr_rms[idx];
+            return zigzag_encode(delta);
+        }
+        return cur;
+    };
+
+    std::array<size_t, 8> rice_costs{};
+    for (int idx : sbr_indices) {
+        const uint32_t value = get_sbr_value(idx);
+        for (int k = 0; k <= 7; ++k)
+            rice_costs[k] += (value >> k) + 1 + k;
+    }
+    int k_sbr = 0;
+    for (int candidate = 1; candidate <= 7; ++candidate)
+        if (rice_costs[candidate] < rice_costs[k_sbr])
+            k_sbr = candidate;
 
     writer.write_bits(k_sbr & 0x07, 3);
-    rice_encode(writer, sbr_vals, k_sbr);
+    const uint32_t remainder_mask =
+        k_sbr == 0 ? 0u : (1u << k_sbr) - 1u;
+    for (int idx : sbr_indices) {
+        const uint32_t value = get_sbr_value(idx);
+        const uint32_t quotient = value >> k_sbr;
+        if (quotient > 0)
+            writer.write_bits(~0ULL, quotient);
+        writer.write_bits(0, 1);
+        if (k_sbr > 0)
+            writer.write_bits(value & remainder_mask, k_sbr);
+    }
 }
 
 inline void sbr_write_to_stream1(

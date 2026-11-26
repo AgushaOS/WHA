@@ -5,10 +5,11 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
+#include <utility>
 
 class DD64in {
 protected:
-    mutable std::vector<float> scratch_ext;
     mutable std::vector<float> tmp;
 
     void decompose_block(float* __restrict data, size_t N) const {
@@ -17,11 +18,16 @@ protected:
         const size_t even_len = (N + 1) >> 1;
         const size_t odd_len  = N >> 1;
 
-        if (tmp.size() < N)
-            tmp.resize(N);
+        constexpr size_t EVEN_PADDING = 8;
+        constexpr size_t ODD_PADDING = 3;
+        const size_t required_size =
+            N + 2 * EVEN_PADDING + 2 * ODD_PADDING;
+        if (tmp.size() < required_size)
+            tmp.resize(required_size);
 
-        float* __restrict even = tmp.data();
-        float* __restrict odd  = tmp.data() + even_len;
+        float* __restrict even = tmp.data() + EVEN_PADDING;
+        float* __restrict odd =
+            tmp.data() + EVEN_PADDING + even_len + EVEN_PADDING + ODD_PADDING;
 
         for (size_t i = 0; i < even_len; ++i)
             even[i] = data[i << 1];
@@ -29,30 +35,23 @@ protected:
         for (size_t i = 0; i < odd_len; ++i)
             odd[i] = data[(i << 1) + 1];
 
-        if (scratch_ext.size() < even_len + 16)
-            scratch_ext.resize(even_len + 16);
+        even[-1] = even[0];
+        even[-2] = even[1];
+        even[-3] = even[2];
+        even[-4] = even[3];
+        even[-5] = even[4];
+        even[-6] = even[5];
+        even[-7] = even[6];
+        even[-8] = even[7];
 
-        float* __restrict pe = scratch_ext.data() + 8;
-
-        std::memcpy(pe, even, even_len * sizeof(float));
-
-        pe[-1] = even[0];
-        pe[-2] = even[1];
-        pe[-3] = even[2];
-        pe[-4] = even[3];
-        pe[-5] = even[4];
-        pe[-6] = even[5];
-        pe[-7] = even[6];
-        pe[-8] = even[7];
-
-        pe[even_len]     = even[even_len - 1];
-        pe[even_len + 1] = even[even_len - 2];
-        pe[even_len + 2] = even[even_len - 3];
-        pe[even_len + 3] = even[even_len - 4];
-        pe[even_len + 4] = even[even_len - 5];
-        pe[even_len + 5] = even[even_len - 6];
-        pe[even_len + 6] = even[even_len - 7];
-        pe[even_len + 7] = even[even_len - 8];
+        even[even_len]     = even[even_len - 1];
+        even[even_len + 1] = even[even_len - 2];
+        even[even_len + 2] = even[even_len - 3];
+        even[even_len + 3] = even[even_len - 4];
+        even[even_len + 4] = even[even_len - 5];
+        even[even_len + 5] = even[even_len - 6];
+        even[even_len + 6] = even[even_len - 7];
+        even[even_len + 7] = even[even_len - 8];
 
         constexpr float C0 = -0.0000063926f;
         constexpr float C1 =  0.0001106411f;
@@ -64,7 +63,7 @@ protected:
         constexpr float C7 =  0.6170455217f;
 
         for (size_t i = 0; i < odd_len; ++i) {
-            float* __restrict p = pe + i;
+            float* __restrict p = even + i;
 
             float pred =
                 C0 * (p[-7] + p[8]) +
@@ -79,22 +78,18 @@ protected:
             odd[i] -= pred;
         }
 
-        float* __restrict pd = scratch_ext.data() + 3;
+        odd[-1] = odd[0];
+        odd[-2] = odd[1];
+        odd[-3] = odd[2];
 
-        std::memcpy(pd, odd, odd_len * sizeof(float));
-
-        pd[-1] = odd[0];
-        pd[-2] = odd[1];
-        pd[-3] = odd[2];
-
-        pd[odd_len]     = odd[odd_len - 1];
-        pd[odd_len + 1] = odd[odd_len - 2];
-        pd[odd_len + 2] = odd[odd_len - 3];
+        odd[odd_len]     = odd[odd_len - 1];
+        odd[odd_len + 1] = odd[odd_len - 2];
+        odd[odd_len + 2] = odd[odd_len - 3];
 
         constexpr float INV64 = 1.0f / 64.0f;
 
         for (size_t i = 0; i < even_len; ++i) {
-            float* __restrict p = pd + i;
+            float* __restrict p = odd + i;
 
             float upd =
                 ((p[-3] + p[2])
@@ -147,8 +142,35 @@ public:
         int sr,
         int channels)
     {
-        std::vector<float> data = signal;
+        return wpt_impl(signal, levels, bitrate, sr, channels);
+    }
 
+    std::vector<std::vector<float>> wpt_interleaved(
+        const std::vector<float>& signal,
+        int channel,
+        int levels,
+        float bitrate,
+        int sr,
+        int channels)
+    {
+        if (channels <= 0 || channel < 0 || channel >= channels)
+            throw std::invalid_argument("Invalid interleaved WPT channel");
+        const size_t sample_count = signal.size() / static_cast<size_t>(channels);
+        std::vector<float> data(sample_count);
+        for (size_t i = 0; i < sample_count; ++i)
+            data[i] = signal[i * static_cast<size_t>(channels) +
+                             static_cast<size_t>(channel)];
+        return wpt_impl(std::move(data), levels, bitrate, sr, channels);
+    }
+
+private:
+    std::vector<std::vector<float>> wpt_impl(
+        std::vector<float> data,
+        int levels,
+        float bitrate,
+        int sr,
+        int channels)
+    {
         wpt_decompose(data, levels);
 
         const size_t N = data.size();

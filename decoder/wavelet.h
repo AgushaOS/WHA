@@ -10,21 +10,26 @@
 class DD64out {
 protected:
     mutable std::vector<float> scratch_ext;
+    mutable std::vector<float> scratch_even;
     mutable std::vector<float> tmp;
 
-    void reconstruct_block(float* __restrict data, size_t N) const {
+    void reconstruct_block(const float* __restrict source,
+                           float* __restrict destination,
+                           size_t N) const {
         if (N < 2) return;
 
         const size_t even_len = (N + 1) >> 1;
         const size_t odd_len  = N >> 1;
 
-        float* __restrict even = data;
-        float* __restrict odd  = data + even_len;
-
-        if (scratch_ext.size() < even_len + 16)
-            scratch_ext.resize(even_len + 16);
+        const size_t scratch_size = even_len + 16;
+        if (scratch_ext.size() < scratch_size)
+            scratch_ext.resize(scratch_size);
+        if (scratch_even.size() < scratch_size)
+            scratch_even.resize(scratch_size);
 
         float* __restrict pd = scratch_ext.data() + 3;
+        float* __restrict even = scratch_even.data() + 8;
+        const float* __restrict odd = source + even_len;
 
         std::memcpy(pd, odd, odd_len * sizeof(float));
 
@@ -46,30 +51,27 @@ protected:
                  - 6.0f  * (p[-2] + p[1])
                  + 21.0f * (p[-1] + p[0])) * INV64;
 
-            even[i] -= upd;
+            even[i] = source[i] - upd;
         }
 
-        float* __restrict pe = scratch_ext.data() + 8;
+        float* __restrict pe = even;
+        pe[-1] = pe[0];
+        pe[-2] = pe[1];
+        pe[-3] = pe[2];
+        pe[-4] = pe[3];
+        pe[-5] = pe[4];
+        pe[-6] = pe[5];
+        pe[-7] = pe[6];
+        pe[-8] = pe[7];
 
-        std::memcpy(pe, even, even_len * sizeof(float));
-
-        pe[-1] = even[0];
-        pe[-2] = even[1];
-        pe[-3] = even[2];
-        pe[-4] = even[3];
-        pe[-5] = even[4];
-        pe[-6] = even[5];
-        pe[-7] = even[6];
-        pe[-8] = even[7];
-
-        pe[even_len]     = even[even_len - 1];
-        pe[even_len + 1] = even[even_len - 2];
-        pe[even_len + 2] = even[even_len - 3];
-        pe[even_len + 3] = even[even_len - 4];
-        pe[even_len + 4] = even[even_len - 5];
-        pe[even_len + 5] = even[even_len - 6];
-        pe[even_len + 6] = even[even_len - 7];
-        pe[even_len + 7] = even[even_len - 8];
+        pe[even_len]     = pe[even_len - 1];
+        pe[even_len + 1] = pe[even_len - 2];
+        pe[even_len + 2] = pe[even_len - 3];
+        pe[even_len + 3] = pe[even_len - 4];
+        pe[even_len + 4] = pe[even_len - 5];
+        pe[even_len + 5] = pe[even_len - 6];
+        pe[even_len + 6] = pe[even_len - 7];
+        pe[even_len + 7] = pe[even_len - 8];
 
         constexpr float C0 = -0.0000063926f;
         constexpr float C1 =  0.0001106411f;
@@ -93,32 +95,35 @@ protected:
                 C6 * (p[-1] + p[2]) +
                 C7 * (p[0]  + p[1]);
 
-            odd[i] += pred;
+            destination[(i << 1) + 1] = odd[i] + pred;
         }
 
-        if (tmp.size() < N)
-            tmp.resize(N);
-
-        float* __restrict dst = tmp.data();
-
         for (size_t i = 0; i < even_len; ++i)
-            dst[i << 1] = even[i];
-
-        for (size_t i = 0; i < odd_len; ++i)
-            dst[(i << 1) + 1] = odd[i];
-
-        std::memcpy(data, dst, N * sizeof(float));
+            destination[i << 1] = pe[i];
     }
 
     void reconstruct_tree(float* __restrict data,
                           size_t N,
                           int level) const {
+        if (level <= 0 || N < 2) return;
+
+        if (tmp.size() < N)
+            tmp.resize(N);
+
+        float* source = data;
+        float* destination = tmp.data();
+
         for (int L = level - 1; L >= 0; --L) {
             const size_t step = N >> L;
 
             for (size_t offset = 0; offset < N; offset += step)
-                reconstruct_block(data + offset, step);
+                reconstruct_block(source + offset, destination + offset, step);
+
+            std::swap(source, destination);
         }
+
+        if (source != data)
+            std::memcpy(data, source, N * sizeof(float));
     }
 
 public:
@@ -149,10 +154,25 @@ public:
         float target_kbps,
         float channels)
     {
+        std::vector<float> data;
+        iwpt_into(subbands, sr, levels, target_kbps, channels, data);
+        return data;
+    }
+
+    void iwpt_into(
+        std::vector<std::vector<float>>& subbands,
+        float sr,
+        int levels,
+        float target_kbps,
+        float channels,
+        std::vector<float>& data)
+    {
         const int total_bands = 1 << levels;
 
-        if (total_bands == 0 || subbands.empty())
-            return {};
+        if (total_bands == 0 || subbands.empty()) {
+            data.clear();
+            return;
+        }
 
         const size_t band_size = subbands[0].size();
         const size_t N = size_t(total_bands) * band_size;
@@ -174,7 +194,7 @@ public:
             }
         }
 
-        std::vector<float> data(N);
+        data.resize(N);
 
         float* __restrict dst = data.data();
 
@@ -207,8 +227,6 @@ public:
         }
 
         reconstruct_tree(dst, N, levels);
-
-        return data;
     }
 };
 

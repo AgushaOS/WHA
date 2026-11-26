@@ -59,16 +59,18 @@ public:
          
          win_.resize(NFFT);
          win_sq_.resize(NFFT);
+         win_norm_.resize(HOP);
          for (int i = 0; i < NFFT; ++i) {
              float s = std::sin((float)M_PI * (float)i / (float)NFFT);
              win_[i] = std::sqrt(std::sin((float)(M_PI / 2.0) * s * s));
              win_sq_[i] = win_[i] * win_[i];
          }
+         for (int i = 0; i < HOP; ++i)
+             win_norm_[i] = win_sq_[i] + win_sq_[i + HOP];
          
          for (auto& ch : channels_) {
              ch.queue.reserve(1024 * 1024); 
              ch.acc.reserve(1024 * 1024);
-             ch.wacc.reserve(1024 * 1024);
          }
      }
 
@@ -129,7 +131,6 @@ private:
     struct ChannelState {
         std::vector<float> queue;
         std::vector<float> acc;
-        std::vector<float> wacc;
         int64_t queue_start = 0;
         int64_t acc_start   = 0;
         int64_t next_frame  = 0;
@@ -155,6 +156,7 @@ private:
     float* out_ = nullptr;
     std::vector<float> win_;
     std::vector<float> win_sq_;
+    std::vector<float> win_norm_;
 
     
 
@@ -295,7 +297,6 @@ private:
         if (end_pos <= cur_end) return;
         const size_t new_size = (size_t)(end_pos - cs.acc_start);
         cs.acc.resize(new_size, 0.0f);
-        cs.wacc.resize(new_size, 0.0f);
     }
 
     void processChannel(ChannelState& cs, std::vector<float>& out, bool final) {
@@ -349,27 +350,28 @@ private:
             
             const int64_t a_idx = cs.next_frame - cs.acc_start;
             float* __restrict__ acc_ptr = cs.acc.data() + a_idx;
-            float* __restrict__ wacc_ptr = cs.wacc.data() + a_idx;
-            const float* __restrict__ win_ptr = win_sq_.data();
-            for (int i = 0; i < NFFT; ++i) {
+            for (int i = 0; i < NFFT; ++i)
                 acc_ptr[i] += frame[i];
-                wacc_ptr[i] += win_ptr[i];
-            }
             cs.next_frame += HOP;
         }
 
         const int64_t finalized = cs.next_frame;
         int64_t emit_end = std::min(finalized, input_end);
         if (emit_end < cs.emitted) emit_end = cs.emitted;
-        out.reserve(out.size() + (emit_end - cs.emitted));
-        for (int64_t p = cs.emitted; p < emit_end; ++p) {
-            if (p < PAD) continue;
+        const int64_t emit_start = std::max(cs.emitted, int64_t(PAD));
+        const size_t emit_count =
+            emit_end > emit_start ? (size_t)(emit_end - emit_start) : 0;
+        const size_t out_start = out.size();
+        out.resize(out_start + emit_count);
+        float* out_ptr = emit_count ? out.data() + out_start : nullptr;
+        for (int64_t p = emit_start; p < emit_end; ++p) {
             const int64_t idx = p - cs.acc_start;
             float v = 0.0f;
-            if (idx >= 0 && idx < (int64_t)cs.acc.size() && cs.wacc[(size_t)idx] > 1e-12f) {
-                v = cs.acc[(size_t)idx] / cs.wacc[(size_t)idx];
+            const float norm = win_norm_[(size_t)p & (HOP - 1)];
+            if (idx >= 0 && idx < (int64_t)cs.acc.size() && norm > 1e-12f) {
+                v = cs.acc[(size_t)idx] / norm;
             }
-            out.push_back(v);
+            out_ptr[(size_t)(p - emit_start)] = v;
         }
         cs.emitted = emit_end;
 
@@ -387,9 +389,7 @@ private:
             size_t drop = (size_t)a_drop;
             size_t remaining = cs.acc.size() - drop;
             std::memmove(cs.acc.data(), cs.acc.data() + drop, remaining * sizeof(float));
-            std::memmove(cs.wacc.data(), cs.wacc.data() + drop, remaining * sizeof(float));
             cs.acc.resize(remaining);
-            cs.wacc.resize(remaining);
             cs.acc_start += drop; 
         }
     }

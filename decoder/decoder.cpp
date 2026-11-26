@@ -260,7 +260,13 @@ static inline std::vector<uint32_t> decode_kidx_huff_vec(BitReaderMSB& r, size_t
 
 struct WptHuffSlotDecoder {
     static constexpr int SHORT_MAX = 12;
+    static constexpr int FAST_BITS = 12;
+    struct FastEntry {
+        int16_t symbol = 0;
+        uint8_t length = 0;
+    };
     int max_len = 0;
+    std::vector<FastEntry> lut_fast;
     std::vector<int16_t> lut_short;
     std::vector<std::vector<std::pair<int,int>>> by_len;
 };
@@ -268,6 +274,7 @@ struct WptHuffSlotDecoder {
 static void build_wpt_decoder(WptHuffSlotDecoder& dec, int slot) {
     dec.max_len = 0;
     dec.by_len.assign(23, {});
+    dec.lut_fast.assign(1 << WptHuffSlotDecoder::FAST_BITS, {});
     dec.lut_short.assign(1 << (WptHuffSlotDecoder::SHORT_MAX + 1), INT16_MIN);
     for (int i = 0; i < 255; ++i) {
         int len = WPT_COEFF_HUFF_LEN[slot][i];
@@ -276,6 +283,15 @@ static void build_wpt_decoder(WptHuffSlotDecoder& dec, int slot) {
         int sym  = i + WPT_COEFF_HUFF_LO;
         if (len <= WptHuffSlotDecoder::SHORT_MAX) {
             dec.lut_short[((1 << len) - 2) + code] = (int16_t)sym;
+            if (len <= WptHuffSlotDecoder::FAST_BITS) {
+                const int prefix = code << (WptHuffSlotDecoder::FAST_BITS - len);
+                const int suffix_count = 1 << (WptHuffSlotDecoder::FAST_BITS - len);
+                for (int suffix = 0; suffix < suffix_count; ++suffix) {
+                    auto& entry = dec.lut_fast[prefix + suffix];
+                    entry.symbol = static_cast<int16_t>(sym);
+                    entry.length = static_cast<uint8_t>(len);
+                }
+            }
         } else {
             dec.by_len[len].push_back({code, sym});
         }
@@ -284,6 +300,15 @@ static void build_wpt_decoder(WptHuffSlotDecoder& dec, int slot) {
 }
 
 static inline int decode_wpt_huff(BitReaderMSB& r, const WptHuffSlotDecoder& dec) {
+    if (r.available_bits() >= WptHuffSlotDecoder::FAST_BITS) {
+        const auto& entry =
+            dec.lut_fast[r.peek_bits(WptHuffSlotDecoder::FAST_BITS)];
+        if (entry.length != 0) {
+            r.read_bits(entry.length);
+            return entry.symbol;
+        }
+    }
+
     int code = 0;
     const int16_t* lut = dec.lut_short.data();
     for (int len = 1; len <= WptHuffSlotDecoder::SHORT_MAX; ++len) {
@@ -302,7 +327,7 @@ static inline int decode_wpt_huff(BitReaderMSB& r, const WptHuffSlotDecoder& dec
 struct DecoderOptions {
     std::string input_wha;
     std::string output_wav;
-    size_t buffer = 8192;
+    size_t buffer = 16384;
     bool sbr_override = false;
     float sbr_w0 = 1.0f, sbr_w1 = 9.0f;
 };
@@ -315,7 +340,7 @@ Arguments:
 <input.wha>                  Path to compressed file
 Options:
 --output <path>              Output WAV (default: <input>.wav)
---buffer <samples>           Write batch size (default 8192, max 65536)
+--buffer <samples>           Write batch size (default 16384, max 65536)
 --sbr-weights <w0> <w1>      Override SBR weights
 --help, -h                   Show this help
 )";
@@ -334,7 +359,7 @@ static bool parse_decoder_args(int argc, char** argv, DecoderOptions& o)
         };
         if      (a == "--help" || a == "-h") { print_help_decoder(); return false; }
         else if (a == "--output")      { if(!need("--output")) return false; o.output_wav = argv[++i]; }
-        else if (a == "--buffer")      { if(!need("--buffer")) return false; o.buffer = std::stoul(argv[++i]); if (o.buffer == 0) o.buffer = 8192; if (o.buffer > 65536) o.buffer = 65536; }
+        else if (a == "--buffer")      { if(!need("--buffer")) return false; o.buffer = std::stoul(argv[++i]); if (o.buffer == 0) o.buffer = 16384; if (o.buffer > 65536) o.buffer = 65536; }
         else if (a == "--sbr-weights") {
             if (i + 2 >= argc) { std::cerr << "--sbr-weights needs 2 values\n"; return false; }
             o.sbr_w0 = std::stof(argv[++i]);
@@ -375,8 +400,8 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
     uint32_t block_count = read_u32(f);
     float    target_kbps = read_f32(f);
     uint8_t  block_format_version = read_u8(f);
-    if (block_format_version != 36)
-        throw std::runtime_error("Unsupported block format version (only v36 supported)");
+    if (block_format_version != 39)
+        throw std::runtime_error("Unsupported block format version (only v39 supported)");
 
     uint32_t total_frames = read_u32(f);
 
@@ -548,9 +573,19 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
         const std::vector<float>& window    = wc.window;
         const std::vector<float>& window_sq = wc.window_sq;
 
-        int  k_scale0 = k_scale_byte & 0x07;
-        int  k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
         bool block_is_full = (k_scale_byte & 0x80) != 0;
+        const bool reuse_scale_k = (k_scale_byte & 0x40) != 0;
+        int k_scale0 = 0;
+        int k_scale1 = 0;
+        if (reuse_scale_k) {
+            if (!can_state_pred || !pred_state.prev_scale_k_valid)
+                throw std::runtime_error("Invalid scale Rice predictor state");
+            k_scale0 = pred_state.prev_scale_k0;
+            k_scale1 = stereo ? pred_state.prev_scale_k1 : 0;
+        } else {
+            k_scale0 = k_scale_byte & 0x07;
+            k_scale1 = stereo ? ((k_scale_byte >> 3) & 0x07) : 0;
+        }
         bool use_scale_pred = true;  
 
         int sbr_end = (decoder_enable_sbr && block_is_full)
@@ -564,18 +599,32 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
         BitReaderMSB payload_reader(blk.data() + ptr, payload_len);
         ptr += payload_len;
 
+        const bool predict_mode_ms = can_state_pred && payload_reader.read_bits(1) != 0;
         for (int i = 0; i < expected_band_count; i += 4) {
             int nibble = huffman_decode_mode_ms(payload_reader);
             for (int s = 0; s < 4; ++s) {
                 int idx = i + s;
-                if (idx < expected_band_count) mode_ms[idx] = (nibble >> (3 - s)) & 1;
+                if (idx < expected_band_count) {
+                    uint8_t bit = (nibble >> (3 - s)) & 1;
+                    if (predict_mode_ms && can_state_pred &&
+                        idx < (int)pred_state.prev_mode_ms.size())
+                        bit ^= pred_state.prev_mode_ms[idx];
+                    mode_ms[idx] = bit;
+                }
             }
         }
+        const bool predict_active0 = can_state_pred && payload_reader.read_bits(1) != 0;
         for (int i = 0; i < expected_band_count; i += 4) {
             int nibble = huffman_decode_active(payload_reader);
             for (int s = 0; s < 4; ++s) {
                 int idx = i + s;
-                if (idx < expected_band_count) active0[idx] = (nibble >> (3 - s)) & 1;
+                if (idx < expected_band_count) {
+                    uint8_t bit = (nibble >> (3 - s)) & 1;
+                    if (predict_active0 && can_state_pred &&
+                        idx < (int)pred_state.prev_active0.size())
+                        bit ^= pred_state.prev_active0[idx];
+                    active0[idx] = bit;
+                }
             }
         }
         if (stereo) {
@@ -588,13 +637,19 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
             }
             int non_is_count = (int)idx_list.size();
             std::fill_n(active1.begin(), expected_band_count, (uint8_t)0);
+            const bool predict_active1 = can_state_pred && payload_reader.read_bits(1) != 0;
             int bit_idx = 0;
             int n_nibbles = (non_is_count + 3) / 4;
             for (int j = 0; j < n_nibbles; ++j) {
                 int nibble = huffman_decode_active(payload_reader);
                 for (int s = 0; s < 4; ++s) {
                     if (bit_idx < non_is_count) {
-                        active1[idx_list[bit_idx]] = (nibble >> (3 - s)) & 1;
+                        const int band = idx_list[bit_idx];
+                        uint8_t bit = (nibble >> (3 - s)) & 1;
+                        if (predict_active1 && can_state_pred &&
+                            band < (int)pred_state.prev_active1.size())
+                            bit ^= pred_state.prev_active1[band];
+                        active1[band] = bit;
                         bit_idx++;
                     }
                 }
@@ -611,17 +666,17 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
             std::vector<uint32_t>& prev_scale,
             const std::vector<uint8_t>& prev_active)
         {
-            int active_count = 0;
-            for (int i = 0; i < expected_band_count; ++i) if (active[i]) active_count++;
-            if (active_count == 0) return;
+            bool has_active = false;
+            for (int i = 0; i < expected_band_count; ++i)
+                has_active |= active[i] != 0;
+            if (!has_active) return;
 
-            auto all_scales = rice_decode(payload_reader, (size_t)active_count, k_scale);
-            if ((int)all_scales.size() != active_count) throw std::runtime_error("Scale count mismatch");
-
-            int scale_idx = 0;
             for (int i = 0; i < expected_band_count; ++i) {
                 if (!active[i]) continue;
-                uint32_t val = all_scales[scale_idx++];
+                const uint32_t quotient = payload_reader.read_unary();
+                const uint32_t remainder =
+                    k_scale > 0 ? payload_reader.read_bits(k_scale) : 0;
+                const uint32_t val = (quotient << k_scale) | remainder;
                 int sb = get_scale_bits(i);
                 int max_idx = (1 << sb) - 1;
                 uint32_t idx;
@@ -658,11 +713,70 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
             if (stereo && active1[i]) active_count1++;
         }
 
-        int kidx_slot0 = (int)payload_reader.read_bits(3);
-        int kidx_slot1 = stereo ? (int)payload_reader.read_bits(3) : 0;
-        std::vector<uint32_t> k_sub_vals0 = decode_kidx_huff_vec(payload_reader, (size_t)active_count0, kidx_slot0);
+        const auto decode_k_sub_modes = [&](const std::vector<uint8_t>& active,
+                                            int active_count,
+                                            const std::vector<uint8_t>& previous_active,
+                                            const std::vector<uint8_t>& previous_modes) {
+            std::vector<uint32_t> values;
+            values.reserve(static_cast<size_t>(active_count));
+            const bool use_prediction = can_state_pred && payload_reader.read_bits(1) != 0;
+            if (!use_prediction) {
+                const int slot = static_cast<int>(payload_reader.read_bits(3));
+                if (slot >= 8)
+                    throw std::runtime_error("Invalid kidx Huffman slot");
+                values = decode_kidx_huff_vec(payload_reader, static_cast<size_t>(active_count), slot);
+                return values;
+            }
+
+            std::vector<uint8_t> reuse;
+            reuse.reserve(static_cast<size_t>(active_count));
+            int changed_count = 0;
+            for (int band = 0; band < expected_band_count; ++band) {
+                if (!active[band])
+                    continue;
+                const bool can_reuse = can_state_pred &&
+                    band < (int)previous_active.size() && previous_active[band] &&
+                    band < (int)previous_modes.size();
+                const bool reuse_previous = can_reuse && payload_reader.read_bits(1) == 0;
+                if (!can_reuse) {
+                    if (payload_reader.read_bits(1) == 0)
+                        throw std::runtime_error("Invalid kidx prediction for unavailable state");
+                }
+                reuse.push_back(reuse_previous ? 1 : 0);
+                if (!reuse_previous)
+                    ++changed_count;
+            }
+
+            int slot = 0;
+            std::vector<uint32_t> changed_values;
+            if (changed_count > 0) {
+                slot = static_cast<int>(payload_reader.read_bits(3));
+                if (slot >= 8)
+                    throw std::runtime_error("Invalid kidx Huffman slot");
+                changed_values =
+                    decode_kidx_huff_vec(payload_reader, static_cast<size_t>(changed_count), slot);
+            }
+            size_t reuse_idx = 0;
+            size_t changed_idx = 0;
+            for (int band = 0; band < expected_band_count; ++band) {
+                if (!active[band])
+                    continue;
+                if (reuse[reuse_idx++])
+                    values.push_back(previous_modes[band]);
+                else
+                    values.push_back(changed_values[changed_idx++]);
+            }
+            if (values.size() != static_cast<size_t>(active_count))
+                throw std::runtime_error("kidx prediction count mismatch");
+            return values;
+        };
+
+        std::vector<uint32_t> k_sub_vals0 =
+            decode_k_sub_modes(active0, active_count0, pred_state.prev_active0, pred_state.prev_k_sub0);
         std::vector<uint32_t> k_sub_vals1;
-        if (stereo) k_sub_vals1 = decode_kidx_huff_vec(payload_reader, (size_t)active_count1, kidx_slot1);
+        if (stereo)
+            k_sub_vals1 =
+                decode_k_sub_modes(active1, active_count1, pred_state.prev_active1, pred_state.prev_k_sub1);
 
         quant0.resize(expected_band_count);
         quant1.resize(expected_band_count);
@@ -671,7 +785,6 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
 
         int k_idx0 = 0;
         for (int i = 0; i < expected_band_count; ++i) {
-            quant0[i].clear();
             if (!active0[i]) continue;
             if (k_idx0 >= (int)k_sub_vals0.size())
                 throw std::runtime_error("k_sub_vals0 OOB");
@@ -700,19 +813,20 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
             } else {
                 if (k_rice < 0) throw std::runtime_error("Invalid k_rice");
                 if (k_rice > 7) k_rice = 7;
-                auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_rice);
-                if ((int)uvals.size() != band_shapes[i])
-                    throw std::runtime_error("uvals size mismatch ch0");
-                quant0[i].resize(uvals.size());
-                for (size_t j = 0; j < uvals.size(); ++j)
-                    quant0[i][j] = zigzag_decode(uvals[j]);
+                quant0[i].resize(band_shapes[i]);
+                for (int j = 0; j < band_shapes[i]; ++j) {
+                    const uint32_t quotient = payload_reader.read_unary();
+                    const uint32_t remainder =
+                        k_rice > 0 ? payload_reader.read_bits(k_rice) : 0;
+                    quant0[i][j] =
+                        zigzag_decode((quotient << k_rice) | remainder);
+                }
             }
         }
 
         if (stereo) {
             int k_idx1 = 0;
             for (int i = 0; i < expected_band_count; ++i) {
-                quant1[i].clear();
                 if (!active1[i]) continue;
                 if (k_idx1 >= (int)k_sub_vals1.size())
                     throw std::runtime_error("k_sub_vals1 OOB");
@@ -741,12 +855,14 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
                 } else {
                     if (k_rice < 0) throw std::runtime_error("Invalid k_rice");
                     if (k_rice > 7) k_rice = 7;
-                    auto uvals = rice_decode(payload_reader, (size_t)band_shapes[i], k_rice);
-                    if ((int)uvals.size() != band_shapes[i])
-                        throw std::runtime_error("uvals size mismatch ch1");
-                    quant1[i].resize(uvals.size());
-                    for (size_t j = 0; j < uvals.size(); ++j)
-                        quant1[i][j] = zigzag_decode(uvals[j]);
+                    quant1[i].resize(band_shapes[i]);
+                    for (int j = 0; j < band_shapes[i]; ++j) {
+                        const uint32_t quotient = payload_reader.read_unary();
+                        const uint32_t remainder =
+                            k_rice > 0 ? payload_reader.read_bits(k_rice) : 0;
+                        quant1[i][j] =
+                            zigzag_decode((quotient << k_rice) | remainder);
+                    }
                 }
             }
         }
@@ -780,21 +896,67 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
                         }
                     }
 
-                    int table_idx = (int)payload_reader.read_bits(3);
-                    if (table_idx >= IS_TBL_SLOTS)
-                        throw std::runtime_error("Invalid IS table index");
+                    const bool use_rice = payload_reader.read_bits(1) != 0;
+                    std::vector<int> coeff_syms;
+                    size_t coeff_count = 0;
+                    for (int idx : is_indices)
+                        coeff_count += idx < segmented_threshold ? 4 : 1;
+                    coeff_syms.reserve(coeff_count);
+                    if (!use_rice) {
+                        const int table_idx = static_cast<int>(payload_reader.read_bits(3));
+                        if (table_idx >= IS_TBL_SLOTS)
+                            throw std::runtime_error("Invalid IS table index");
+                        for (size_t i = 0; i < coeff_count; ++i)
+                            coeff_syms.push_back(decode_is_coeff_with_table(payload_reader, table_idx));
+                    } else {
+                        const int rice_mode = static_cast<int>(payload_reader.read_bits(2));
+                        if (rice_mode >= 4)
+                            throw std::runtime_error("Invalid IS Rice predictor");
+                        const int rice_k = static_cast<int>(payload_reader.read_bits(3));
+                        int previous = 0;
+                        std::array<int, 4> previous_lane{};
+                        for (int idx : is_indices) {
+                            const int segment_count = idx < segmented_threshold ? 4 : 1;
+                            for (int segment = 0; segment < segment_count; ++segment) {
+                                const uint32_t quotient = payload_reader.read_unary();
+                                const uint32_t remainder = rice_k > 0
+                                    ? payload_reader.read_bits(rice_k) : 0;
+                                const uint32_t residual =
+                                    (quotient << rice_k) | remainder;
+                                if (residual > 28)
+                                    throw std::runtime_error("Invalid IS Rice coefficient residual");
+                                int predictor = 0;
+                                if (rice_mode == 1) {
+                                    predictor = previous;
+                                } else if (rice_mode == 2) {
+                                    predictor = idx < segmented_threshold && segment > 0
+                                        ? coeff_syms.back()
+                                        : previous_lane[segment];
+                                } else if (rice_mode == 3 && can_state_pred &&
+                                           idx < (int)pred_state.prev_is_valid.size() &&
+                                           pred_state.prev_is_valid[idx]) {
+                                    predictor = pred_state.prev_is_coeff[idx][segment];
+                                }
+                                const int sym = predictor + zigzag_decode(residual);
+                                if (sym < IS_TBL_LO || sym > IS_TBL_HI)
+                                    throw std::runtime_error("Invalid IS Rice coefficient");
+                                coeff_syms.push_back(sym);
+                                previous = sym;
+                                previous_lane[segment] = sym;
+                            }
+                        }
+                    }
+                    size_t coeff_idx = 0;
                     for (int idx : is_indices) {
                         int bits = get_r_bits(idx);
                         if (idx < segmented_threshold) {
                             is_use_segmented[idx] = true;
                             for (int s = 0; s < 4; ++s) {
-                                int sym = decode_is_coeff_with_table(payload_reader, table_idx);
-                                is_r[idx][s] = dequantize_r_centered(sym, bits);
+                                is_r[idx][s] = dequantize_r_centered(coeff_syms[coeff_idx++], bits);
                             }
                         } else {
                             is_use_segmented[idx] = false;
-                            int sym = decode_is_coeff_with_table(payload_reader, table_idx);
-                            is_r[idx].fill(dequantize_r_centered(sym, bits));
+                            is_r[idx].fill(dequantize_r_centered(coeff_syms[coeff_idx++], bits));
                         }
                     }
                 }
@@ -808,12 +970,20 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
         }
 
         for (int i = 0; i < expected_band_count; ++i) {
-            ch0_bands[i].clear(); ch0_bands[i].resize(band_shapes[i], 0.0f);
-            if (active0[i]) dequantize_band(quant0[i], steps0[i], ch0_bands[i]); 
+            ch0_bands[i].resize(band_shapes[i]);
+            if (active0[i]) {
+                dequantize_band(quant0[i], steps0[i], ch0_bands[i]);
+            } else {
+                std::fill(ch0_bands[i].begin(), ch0_bands[i].end(), 0.0f);
+            }
             
             if (stereo) {
-                ch1_bands[i].clear(); ch1_bands[i].resize(band_shapes[i], 0.0f);
-                if (active1[i]) dequantize_band(quant1[i], steps1[i], ch1_bands[i]); 
+                ch1_bands[i].resize(band_shapes[i]);
+                if (active1[i]) {
+                    dequantize_band(quant1[i], steps1[i], ch1_bands[i]);
+                } else {
+                    std::fill(ch1_bands[i].begin(), ch1_bands[i].end(), 0.0f);
+                }
             }
         }
 
@@ -842,10 +1012,12 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
         recon_chs.resize(num_channels);
         for (int ch = 0; ch < num_channels; ++ch) {
             auto& bands = (ch == 0) ? ch0_bands : ch1_bands;
-            auto rec = wpt.iwpt(bands, sr, level, target_kbps, num_channels);
-            if (rec.size() < (size_t)block_size) rec.resize(block_size, 0.0f);
-            else rec.resize(block_size);
-            recon_chs[ch] = std::move(rec);
+            wpt.iwpt_into(
+                bands, sr, level, target_kbps, num_channels, recon_chs[ch]);
+            if (recon_chs[ch].size() < (size_t)block_size)
+                recon_chs[ch].resize(block_size, 0.0f);
+            else
+                recon_chs[ch].resize(block_size);
         }
 
         int local_start = (ola.current_pos - ola.output_pos) + (int)ola.head_offset;
@@ -858,19 +1030,56 @@ void decompress_wha_to_wav(const DecoderOptions& opts)
 
         pred_state.prev_active0.assign(expected_band_count, 0);
         for (int i = 0; i < expected_band_count; ++i) if (active0[i]) pred_state.prev_active0[i] = 1;
+        pred_state.prev_mode_ms.assign(expected_band_count, 0);
+        for (int i = 0; i < expected_band_count; ++i) if (mode_ms[i]) pred_state.prev_mode_ms[i] = 1;
+        pred_state.prev_scale_k0 = static_cast<uint8_t>(k_scale0);
+        pred_state.prev_scale_k1 = static_cast<uint8_t>(k_scale1);
+        pred_state.prev_scale_k_valid = true;
         if (stereo) {
             pred_state.prev_active1.assign(expected_band_count, 0);
             for (int i = 0; i < expected_band_count; ++i) if (active1[i]) pred_state.prev_active1[i] = 1;
         } else {
             pred_state.prev_active1.assign(expected_band_count, 0);
         }
+        pred_state.prev_k_sub0.assign(expected_band_count, 0);
+        pred_state.prev_k_sub1.assign(expected_band_count, 0);
+        size_t k_mode_idx = 0;
+        for (int i = 0; i < expected_band_count; ++i) {
+            if (active0[i])
+                pred_state.prev_k_sub0[i] = static_cast<uint8_t>(k_sub_vals0[k_mode_idx++]);
+        }
+        k_mode_idx = 0;
+        if (stereo) {
+            for (int i = 0; i < expected_band_count; ++i) {
+                if (active1[i])
+                    pred_state.prev_k_sub1[i] = static_cast<uint8_t>(k_sub_vals1[k_mode_idx++]);
+            }
+        }
         pred_state.prev_sbr_valid.assign(expected_band_count, 0);
         pred_state.prev_sbr_noise.assign(expected_band_count, 0);
+        pred_state.prev_is_valid.assign(expected_band_count, 0);
         for (int idx : sbr.indices) {
             if (idx >= 0 && idx < expected_band_count) {
                 pred_state.prev_sbr_valid[idx] = 1;
                 pred_state.prev_sbr_noise[idx] = sbr.noise_flag[idx] ? 1 : 0;
                 pred_state.prev_sbr_rms[idx]   = sbr.rms_idx[idx];
+                pred_state.prev_sbr_shape[idx] = sbr.shape_mask[idx];
+            }
+        }
+        const int is_state_start = get_is_start_band(target_kbps, total_bands);
+        for (int idx = 0; idx < expected_band_count; ++idx) {
+            if (!is_used || idx < is_state_start || !mode_ms[idx])
+                continue;
+            pred_state.prev_is_valid[idx] = 1;
+            const int bits = get_r_bits(idx);
+            if (idx < get_is_segmented_threshold(target_kbps, total_bands)) {
+                for (int segment = 0; segment < 4; ++segment) {
+                    pred_state.prev_is_coeff[idx][segment] = static_cast<int8_t>(
+                        quantize_r_centered(is_r[idx][segment], bits));
+                }
+            } else {
+                const int sym = static_cast<int8_t>(quantize_r_centered(is_r[idx][0], bits));
+                pred_state.prev_is_coeff[idx].fill(static_cast<int8_t>(sym));
             }
         }
         pred_state.ready = true;

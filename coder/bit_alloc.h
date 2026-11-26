@@ -4,7 +4,6 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
-#include <queue>
 #include <climits>
 
 struct DualAllocResult {
@@ -21,8 +20,8 @@ inline DualAllocResult allocate_bits_dual(
     int total_bits_budget,
     std::vector<int>& min_bits_in,
     std::vector<int>& max_bits_in,
-    std::vector<float> energy0,
-    std::vector<float> energy1,
+    const std::vector<float>& energy0,
+    const std::vector<float>& energy1,
     int reservoir,
     int reservoir_max,
     float target_kbps,
@@ -37,12 +36,14 @@ inline DualAllocResult allocate_bits_dual(
 
     static thread_local std::vector<int> bits0, bits1, max_b, active;
     static thread_local std::vector<float> s2_0, s2_1, factor0, factor1, global_score;
+    static thread_local std::vector<float> sqrt_coeff_count;
     bits0.assign(min_bits_in.begin(), min_bits_in.end());
     bits1.assign(min_bits_in.begin(), min_bits_in.end());
     max_b.resize(n);
     s2_0.resize(n); s2_1.resize(n);
     factor0.resize(n); factor1.resize(n);
     global_score.resize(n);
+    sqrt_coeff_count.resize(n);
     active.assign(n, 1);
 
     for (int64_t i = 0; i < energy0.size() * 4 / 16; i++) {
@@ -96,7 +97,8 @@ inline DualAllocResult allocate_bits_dual(
         float sp1 = 0.5f * priority1[i];
         factor0[i] = s2_0[i] * std::pow(std::max(sp0, eps), 0.6f);
         factor1[i] = s2_1[i] * std::pow(std::max(sp1, eps), 0.6f);
-        global_score[i] = (factor0[i] + factor1[i]) * std::sqrt((float)coeff_counts[i]);
+        sqrt_coeff_count[i] = std::sqrt(static_cast<float>(coeff_counts[i]));
+        global_score[i] = (factor0[i] + factor1[i]) * sqrt_coeff_count[i];
     }
 
     int used_bits = 0;
@@ -129,8 +131,17 @@ inline DualAllocResult allocate_bits_dual(
         }
     }
 
-    struct GainEntry { float gain; int idx; bool is0; int next_bits; bool operator<(const GainEntry& other) const { return gain < other.gain; } };
-    std::priority_queue<GainEntry> pq;
+    struct GainEntry {
+        float gain;
+        int idx;
+        bool is0;
+        int next_bits;
+        bool operator<(const GainEntry& other) const { return gain < other.gain; }
+    };
+    static thread_local std::vector<GainEntry> gain_heap;
+    gain_heap.clear();
+    if (gain_heap.capacity() < static_cast<size_t>(n) * 2)
+        gain_heap.reserve(static_cast<size_t>(n) * 2);
     auto push_gain = [&](int i, bool is0) {
         if (!active[i]) return;
         int bits = is0 ? bits0[i] : bits1[i];
@@ -146,12 +157,17 @@ inline DualAllocResult allocate_bits_dual(
         float decay_next = decay_table[trial];
         float factor = is0 ? factor0[i] : factor1[i];
         float gain = (factor * decay_cur * exp2_table[bits] - factor * decay_next * exp2_table[trial]) *
-                     std::max(is0 ? priority0[i] : priority1[i], eps) / std::sqrt(float(coeff_counts[i]));
-        if (gain > 0.0f) pq.push({gain, i, is0, trial});
+                     std::max(is0 ? priority0[i] : priority1[i], eps) / sqrt_coeff_count[i];
+        if (gain > 0.0f) {
+            gain_heap.push_back({gain, i, is0, trial});
+            std::push_heap(gain_heap.begin(), gain_heap.end());
+        }
     };
     for (int i = 0; i < n; i++) { if (active[i]) { push_gain(i, true); push_gain(i, false); } }
-    while (!pq.empty() && used_bits < total_bits_budget) {
-        auto top = pq.top(); pq.pop();
+    while (!gain_heap.empty() && used_bits < total_bits_budget) {
+        std::pop_heap(gain_heap.begin(), gain_heap.end());
+        const GainEntry top = gain_heap.back();
+        gain_heap.pop_back();
         int i = top.idx; if (!active[i]) continue;
         bool is0 = top.is0;
         int cur_bits = is0 ? bits0[i] : bits1[i];
